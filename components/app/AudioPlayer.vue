@@ -177,6 +177,7 @@ export default {
       },
       isLoading: false,
       isCheckingServerProgress: false,
+      serverProgressRevision: 0,
       isDraggingCursor: false,
       draggingTouchStartX: 0,
       draggingTouchStartTime: 0,
@@ -291,7 +292,8 @@ export default {
       }
     },
     showLoadingState() {
-      return this.isLoading || this.isCheckingServerProgress
+      // Downloaded Android media is playable while server progress is checked in the background.
+      return this.isLoading || (this.isCheckingServerProgress && !(this.$platform === 'android' && this.isLocalPlayMethod))
     },
     showCastBtn() {
       return this.$store.state.isCastAvailable
@@ -517,11 +519,13 @@ export default {
     async jumpBackwards() {
       await this.$hapticsImpact()
       if (this.showLoadingState) return
+      this.serverProgressRevision++
       AbsAudioPlayer.seekBackward({ value: this.jumpBackwardsTime })
     },
     async jumpForward() {
       await this.$hapticsImpact()
       if (this.showLoadingState) return
+      this.serverProgressRevision++
       AbsAudioPlayer.seekForward({ value: this.jumpForwardTime })
     },
     setStreamReady() {
@@ -639,6 +643,7 @@ export default {
 
       this.seekedTime = time
       this.seekLoading = true
+      this.serverProgressRevision++
 
       // Pass fractional seconds so seeks to non-integer chapter starts don't truncate
       AbsAudioPlayer.seek({ value: time })
@@ -665,6 +670,7 @@ export default {
       await this.$hapticsImpact()
       if (this.showLoadingState) return
 
+      this.serverProgressRevision++
       this.isPlaying = !!((await AbsAudioPlayer.playPause()) || {}).playing
       this.isEnded = false
     },
@@ -672,6 +678,7 @@ export default {
       this.isCheckingServerProgress = !!value
     },
     play() {
+      this.serverProgressRevision++
       AbsAudioPlayer.playPlayer()
       this.startPlayInterval()
       this.isPlaying = true
@@ -850,6 +857,8 @@ export default {
     //
     onPlayingUpdate(data) {
       console.log('onPlayingUpdate', JSON.stringify(data))
+      // Also invalidate progress fetched before headset/notification playback began.
+      if (data.value) this.serverProgressRevision++
       this.isPlaying = !!data.value
       this.$store.commit('setPlayerPlaying', this.isPlaying)
       if (this.isPlaying) {
@@ -860,6 +869,8 @@ export default {
     },
     onMetadata(data) {
       console.log('onMetadata', JSON.stringify(data))
+      // A native seek while paused must not be overwritten by an older server response.
+      if (Math.abs(this.currentTime - data.currentTime) > 0.01) this.serverProgressRevision++
       this.totalDuration = Number(data.duration.toFixed(2))
       this.currentTime = Number(data.currentTime.toFixed(2))
 

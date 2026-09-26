@@ -37,7 +37,8 @@ export default {
       sleepInterval: null,
       currentEndOfChapterTime: 0,
       serverLibraryItemId: null,
-      serverEpisodeId: null
+      serverEpisodeId: null,
+      serverProgressCheckId: 0
     }
   },
   mixins: [CellularPermissionHelpers],
@@ -51,9 +52,25 @@ export default {
     },
     currentPlaybackSession() {
       return this.$store.state.currentPlaybackSession
+    },
+    networkConnected() {
+      return this.$store.state.networkConnected
+    }
+  },
+  watch: {
+    networkConnected(connected) {
+      if (this.$platform === 'android' && !connected) this.invalidateServerProgressCheck()
+    },
+    currentPlaybackSession() {
+      if (this.$platform === 'android') this.invalidateServerProgressCheck()
     }
   },
   methods: {
+    invalidateServerProgressCheck() {
+      // Capacitor HTTP cannot abort this request. Release the UI immediately and ignore its result.
+      this.serverProgressCheckId++
+      this.$refs.audioPlayer?.setIsCheckingServerProgress(false)
+    },
     showBookmarks() {
       this.showBookmarksModal = true
     },
@@ -311,9 +328,9 @@ export default {
      * Returns the server media progress object, or null if the request fails, times out, or the
      * response doesn't match the requested library item.
      *
-     * The audio player's loading state is shown while the request is in flight so the user
-     * doesn't tap play before we have a chance to update the timestamps. The request timeout
-     * is 7 seconds so a slow/unresponsive server doesn't block the user for long.
+     * Downloaded Android media stays playable during this check. A response is discarded if
+     * playback/position changed, the session closed/replaced, or connectivity was lost.
+     * Streaming and iOS retain their loading state during the request.
      */
     async getServerMediaProgressForCurrentSession() {
       if (!this.$store.state.user.user || !this.$store.state.networkConnected) return null
@@ -327,17 +344,27 @@ export default {
       }
 
       const url = episodeId ? `/api/me/progress/${libraryItemId}/${episodeId}` : `/api/me/progress/${libraryItemId}`
+      const player = this.$refs.audioPlayer
+      const session = this.currentPlaybackSession
+      const revision = player?.serverProgressRevision
+      const isAndroidLocal = this.$platform === 'android' && player?.isLocalPlayMethod
+      const checkId = ++this.serverProgressCheckId
 
-      this.$refs.audioPlayer?.setIsCheckingServerProgress(true)
+      player?.setIsCheckingServerProgress(true)
       try {
         const data = await this.$nativeHttp.get(url, { connectTimeout: 7000, readTimeout: 7000 })
+        if (checkId !== this.serverProgressCheckId) return null
+        if (this.$platform === 'android' && (!this.networkConnected || this.currentPlaybackSession !== session)) return null
+        if (isAndroidLocal && (player.isPlaying || player.serverProgressRevision !== revision)) return null
         if (!data || data.libraryItemId !== libraryItemId) return null
+        if (this.$platform === 'android' && episodeId && data.episodeId !== episodeId) return null
         return data
       } catch (error) {
         console.error('[AudioPlayerContainer] Failed to get server media progress', error)
         return null
       } finally {
-        this.$refs.audioPlayer?.setIsCheckingServerProgress(false)
+        // An obsolete request must not clear a newer request's pending state.
+        if (checkId === this.serverProgressCheckId) player?.setIsCheckingServerProgress(false)
       }
     },
     getLocalMediaProgressForCurrentSession() {
@@ -365,9 +392,18 @@ export default {
      */
     async checkSyncServerProgressWithLocalProgress(localMediaProgress) {
       if (!localMediaProgress) return
+      const localLastUpdate = localMediaProgress.lastUpdate
+      const session = this.currentPlaybackSession
+      const player = this.$refs.audioPlayer
+      const revision = player?.serverProgressRevision
       console.log('[AudioPlayerContainer] checkSyncServerProgressWithLocalProgress: checking server media progress for local media item open in player')
       const serverMediaProgress = await this.getServerMediaProgressForCurrentSession()
       if (!serverMediaProgress?.lastUpdate || serverMediaProgress.lastUpdate <= localMediaProgress.lastUpdate) return
+      if (this.$platform === 'android') {
+        const currentLocalProgress = this.getLocalMediaProgressForCurrentSession()
+        if (!this.networkConnected || this.currentPlaybackSession !== session || player?.isPlaying || player?.serverProgressRevision !== revision) return
+        if (!currentLocalProgress || currentLocalProgress.id !== localMediaProgress.id || currentLocalProgress.lastUpdate !== localLastUpdate) return
+      }
 
       console.log('[AudioPlayerContainer] checkSyncServerProgressWithLocalProgress: server progress is more recent than local progress. Server current time:', serverMediaProgress.currentTime, 'vs local', localMediaProgress.currentTime, `(server lastUpdate=${serverMediaProgress.lastUpdate} > local lastUpdate=${localMediaProgress.lastUpdate})`)
       if (!this.$refs.audioPlayer?.isPlaying && serverMediaProgress.currentTime !== localMediaProgress.currentTime) {
@@ -455,6 +491,7 @@ export default {
     this.$eventBus.$on('socket-reconnected', this.socketReconnected)
   },
   beforeDestroy() {
+    this.invalidateServerProgressCheck()
     this.onLocalMediaProgressUpdateListener?.remove()
     this.onSleepTimerEndedListener?.remove()
     this.onSleepTimerSetListener?.remove()
