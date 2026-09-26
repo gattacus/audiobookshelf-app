@@ -1,4 +1,7 @@
 {
+  "ButtonRetryDownload": "Download erneut versuchen",
+  "LabelDownloadFailed": "Download angehalten",
+  "MessageDownloadStoppedStorage": "Download angehalten: Nicht genug freier Speicherplatz. Gib {0} frei und versuche es erneut.",
   "ButtonAdd": "Hinzufügen",
   "ButtonAddNewServer": "Neuen Server hinzufügen",
   "ButtonAllow": "Erlauben",

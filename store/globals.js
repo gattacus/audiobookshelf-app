@@ -24,6 +24,8 @@ export const getters = {
       return state.itemDownloads.find((i) => {
         // if (episodeId && !i.episodes.some(e => e.id == episodeId)) return false
         if (episodeId && i.episodeId !== episodeId) return false
+        // Failed records remain on the Downloads page, but are no longer active transfers.
+        if (i.downloadItemParts?.length && i.downloadItemParts.every((part) => part.failed || part.moved)) return false
         return i.libraryItemId == libraryItemId
       })
     },
@@ -137,6 +139,9 @@ export const mutations = {
   },
   clearItemDownloads(state) {
     state.itemDownloads = []
+  },
+  retainFailedDownloads(state) {
+    state.itemDownloads = state.itemDownloads.filter((item) => item.downloadItemParts.some((part) => part.failed))
   },
   setBookshelfListView(state, val) {
     state.bookshelfListView = val

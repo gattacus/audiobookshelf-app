@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.text.format.Formatter
 import androidx.core.app.NotificationCompat
 import com.audiobookshelf.app.R
 import com.audiobookshelf.app.models.DownloadItemPart
@@ -43,6 +44,29 @@ class DownloadService : Service() {
 
   fun onPartUpdate(part: DownloadItemPart) {
     val strings = DownloadServiceHost.notificationStrings(this)
+    if (part.failed) {
+      if (part.failureCode == "INSUFFICIENT_STORAGE") {
+        val toFree = (part.requiredStorageBytes - part.availableStorageBytes).coerceAtLeast(0L)
+        val text = strings.storageFailure.replace("{0}", Formatter.formatFileSize(this, toFree))
+        val openApp = packageManager.getLaunchIntentForPackage(packageName)
+        val notification = NotificationCompat.Builder(this, FAILURE_CHANNEL_ID)
+                .setSmallIcon(R.drawable.icon)
+                .setContentTitle(part.filename)
+                .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .setAutoCancel(true)
+                .setOnlyAlertOnce(true)
+                .apply {
+                  if (openApp != null) setContentIntent(PendingIntent.getActivity(
+                          this@DownloadService, 0, openApp, pendingIntentFlags()))
+                }
+                .build()
+        // Separate from the foreground notification, which disappears when work stops.
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+                .notify(part.downloadItemId, FAILURE_NOTIFICATION_ID, notification)
+      }
+      return
+    }
     val text =
             if (part.waitingForSpace) strings.waitingForStorage
             else strings.downloadingFile.replace("{0}", part.filename)
@@ -89,6 +113,8 @@ class DownloadService : Service() {
                     CHANNEL_ID,
                     DownloadServiceHost.notificationStrings(this).downloads,
                     NotificationManager.IMPORTANCE_LOW))
+    manager.createNotificationChannel(NotificationChannel(FAILURE_CHANNEL_ID,
+            DownloadServiceHost.notificationStrings(this).downloads, NotificationManager.IMPORTANCE_DEFAULT))
   }
 
   private fun pendingIntentFlags(): Int = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -96,7 +122,13 @@ class DownloadService : Service() {
   companion object {
     private const val CHANNEL_ID = "downloads"
     private const val NOTIFICATION_ID = 11
+    private const val FAILURE_CHANNEL_ID = "download_failures"
+    private const val FAILURE_NOTIFICATION_ID = 12
     private const val ACTION_CANCEL = "com.audiobookshelf.app.download.CANCEL"
     fun intent(context: Context) = Intent(context, DownloadService::class.java)
+    fun dismissFailure(context: Context, downloadItemId: String) {
+      (context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+              .cancel(downloadItemId, FAILURE_NOTIFICATION_ID)
+    }
   }
 }

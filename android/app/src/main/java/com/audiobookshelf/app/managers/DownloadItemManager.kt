@@ -17,7 +17,6 @@ import com.getcapacitor.JSObject
 import java.io.File
 import java.io.FileInputStream
 import java.util.concurrent.ConcurrentHashMap
-import kotlin.math.max
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -29,7 +28,11 @@ import kotlinx.coroutines.launch
 class DownloadItemManager(
         private val folderScanner: FolderScanner,
         private val context: Context,
-        private var clientEventEmitter: DownloadEventEmitter
+        private var clientEventEmitter: DownloadEventEmitter,
+        private val storageSpace: (File) -> DownloadStorageBudget.Space = {
+          val fs = StatFs(it.absolutePath)
+          DownloadStorageBudget.Space(fs.availableBytes, fs.totalBytes)
+        }
 ) {
   private val tag = "DownloadItemManager"
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -63,6 +66,7 @@ class DownloadItemManager(
     fun onProgress(totalBytesWritten: Long, progress: Long)
     fun onComplete(failed: Boolean)
     fun onAuthError()
+    fun onInsufficientSpace()
   }
 
   @Synchronized
@@ -139,6 +143,11 @@ class DownloadItemManager(
       }
       item.terminalFailureAt = null
       item.stagingCleanupAt = null
+      item.downloadItemParts.filter { !it.moved }.forEach {
+        it.failureCode = null
+        it.availableStorageBytes = 0L
+        it.requiredStorageBytes = 0L
+      }
       IncompleteDownloadCleanup.cancel(context, item.id)
       persist(item, force = true)
     }
@@ -232,12 +241,18 @@ class DownloadItemManager(
           leaveQueued(item, part)
         } else if (part.fileSize <= 0L && currentDownloadItemParts.any { it.fileSize <= 0L }) {
           leaveQueued(item, part)
-        } else if (tryReserve(part)) startDownload(item, part)
-        else {
-          part.waitingForSpace = true
-          part.lastUpdateTime = System.currentTimeMillis()
-          persist(item)
-          clientEventEmitter.onDownloadItemPartUpdate(part)
+        } else {
+          val decision = reserve(part)
+          when (decision.result) {
+            DownloadStorageBudget.Result.AVAILABLE -> startDownload(item, part)
+            DownloadStorageBudget.Result.INSUFFICIENT -> failForStorage(item, part)
+            DownloadStorageBudget.Result.RESERVED -> {
+              part.waitingForSpace = true
+              part.lastUpdateTime = System.currentTimeMillis()
+              persist(item)
+              clientEventEmitter.onDownloadItemPartUpdate(part)
+            }
+          }
         }
       }
     }
@@ -304,6 +319,13 @@ class DownloadItemManager(
                                 synchronized(this@DownloadItemManager) {
                                   if (part !in currentDownloadItemParts) return
                                   handleAuthError(item, part)
+                                }
+                              }
+
+                              override fun onInsufficientSpace() {
+                                synchronized(this@DownloadItemManager) {
+                                  if (part !in currentDownloadItemParts) return
+                                  failForStorage(item, part)
                                 }
                               }
                             },
@@ -449,7 +471,8 @@ class DownloadItemManager(
   }
 
   @Synchronized
-  private fun markTerminalFailure(item: DownloadItem, part: DownloadItemPart, reason: String) {
+  private fun markTerminalFailure(item: DownloadItem, part: DownloadItemPart, reason: String,
+          failureCode: String = "TRANSFER_FAILED") {
     AbsLogger.error(tag, "$reason: ${part.filename}")
     removeActivePart(part)
     reservations.remove(part.destinationPath)
@@ -457,12 +480,26 @@ class DownloadItemManager(
     part.completed = false
     part.downloadId = null
     part.isMoving = false
+    part.waitingForSpace = false
+    part.failureCode = failureCode
     item.terminalFailureAt = item.terminalFailureAt ?: System.currentTimeMillis()
     item.stagingCleanupAt = null
     persist(item, force = true)
     IncompleteDownloadCleanup.schedule(context, item)
     clientEventEmitter.onDownloadItemPartUpdate(part)
     notifyQueueChanged()
+  }
+
+  @Synchronized
+  private fun failForStorage(item: DownloadItem, part: DownloadItemPart) {
+    val staging = File(part.destinationPath)
+    val space = storageFor(staging)
+    // Explicit retry starts fresh, so report space needed for that full attempt.
+    val decision = DownloadStorageBudget.evaluate(space, part.fileSize, 0L, part.isInternalStorage, 0L)
+    part.availableStorageBytes = space.availableBytes
+    part.requiredStorageBytes = decision.requiredFreeBytes
+    markTerminalFailure(item, part, "Not enough free space (${space.availableBytes} available, " +
+            "${decision.requiredFreeBytes} required)", "INSUFFICIENT_STORAGE")
   }
 
   private fun finalizeInternalFile(item: DownloadItem, part: DownloadItemPart) {
@@ -499,8 +536,10 @@ class DownloadItemManager(
     persist(item, force = true)
     scope.launch {
       try {
-        if (!hasAvailableSpace(part))
-                throw IllegalStateException("Insufficient storage for SAF copy")
+        if (!hasAvailableSpace(part)) {
+          failForStorage(item, part)
+          return@launch
+        }
         val folderKey = "${root.uri}/${part.finalDestinationSubfolder}"
         val folderLock = safFolderLocks.computeIfAbsent(folderKey) { Any() }
         val folder =
@@ -597,33 +636,29 @@ class DownloadItemManager(
     }
   }
 
-  private fun tryReserve(part: DownloadItemPart): Boolean {
+  private fun reserve(part: DownloadItemPart): DownloadStorageBudget.Decision {
     val staging = File(part.destinationPath)
     staging.parentFile?.mkdirs()
-    val expectedSize = if (part.fileSize > 0L) part.fileSize else UNKNOWN_PART_RESERVATION_BYTES
-    val remaining =
-            (expectedSize - (staging.takeIf(File::exists)?.length() ?: 0L)).coerceAtLeast(0L)
-    val required = if (part.isInternalStorage) remaining else remaining + expectedSize
     val key = storageKey(staging)
-    val fs = statFsFor(staging)
-    val headroom = max(MIN_FREE_SPACE_BYTES, fs.totalBytes / 20L)
     val alreadyReserved = reservations.filterKeys { storageKey(File(it)) == key }.values.sum()
-    if (fs.availableBytes - alreadyReserved < required + headroom) return false
-    reservations[part.destinationPath] = required
-    return true
+    val decision = DownloadStorageBudget.evaluate(storageFor(staging), part.fileSize,
+            staging.takeIf(File::exists)?.length() ?: 0L, part.isInternalStorage, alreadyReserved)
+    if (decision.result == DownloadStorageBudget.Result.AVAILABLE)
+      reservations[part.destinationPath] = decision.reservationBytes
+    return decision
   }
 
   private fun hasAvailableSpace(part: DownloadItemPart): Boolean {
     val staging = File(part.destinationPath)
-    val fs = statFsFor(staging)
-    return fs.availableBytes >= max(MIN_FREE_SPACE_BYTES, fs.totalBytes / 20L)
+    val space = storageFor(staging)
+    return space.availableBytes >= DownloadStorageBudget.headroom(space)
   }
 
-  private fun statFsFor(staging: File): StatFs {
+  private fun storageFor(staging: File): DownloadStorageBudget.Space {
     var directory = staging.parentFile ?: context.filesDir
     directory.mkdirs()
     while (!directory.exists()) directory = directory.parentFile ?: context.filesDir
-    return StatFs(directory.absolutePath)
+    return storageSpace(directory)
   }
 
   private fun storageKey(file: File): String =
@@ -788,7 +823,5 @@ class DownloadItemManager(
     const val MAX_RETRIES = 5
     const val MAX_AUTH_RETRIES = 2
     const val PERSIST_INTERVAL_MS = 2_000L
-    const val MIN_FREE_SPACE_BYTES = 100L * 1024L * 1024L
-    const val UNKNOWN_PART_RESERVATION_BYTES = 100L * 1024L * 1024L
   }
 }

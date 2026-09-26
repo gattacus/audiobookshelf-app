@@ -26,7 +26,8 @@ object DownloadServiceHost {
           val downloadingFile: String,
           val waitingForStorage: String,
           val downloads: String,
-          val cancel: String
+          val cancel: String,
+          val storageFailure: String
   )
 
   private var manager: DownloadItemManager? = null
@@ -105,10 +106,10 @@ object DownloadServiceHost {
         callback(ExistingDownloadResult.NOT_FOUND)
       } else if (!queue.retryDownloadItem(downloadItemId)) {
         callback(ExistingDownloadResult.ACTIVE)
-      } else if (startService(context)) {
-        callback(ExistingDownloadResult.RETRIED)
       } else {
-        callback(ExistingDownloadResult.SERVICE_START_FAILED)
+        DownloadService.dismissFailure(context, downloadItemId)
+        callback(if (startService(context)) ExistingDownloadResult.RETRIED
+                else ExistingDownloadResult.SERVICE_START_FAILED)
       }
     }
   }
@@ -127,7 +128,8 @@ object DownloadServiceHost {
           downloadingFile: String,
           waitingForStorage: String,
           downloads: String,
-          cancel: String
+          cancel: String,
+          storageFailure: String
   ) {
     context.getSharedPreferences(NOTIFICATION_PREFERENCES, Context.MODE_PRIVATE)
             .edit()
@@ -136,6 +138,7 @@ object DownloadServiceHost {
             .putString(KEY_WAITING_FOR_STORAGE, waitingForStorage)
             .putString(KEY_DOWNLOADS, downloads)
             .putString(KEY_CANCEL, cancel)
+            .putString(KEY_STORAGE_FAILURE, storageFailure)
             .apply()
   }
 
@@ -148,7 +151,8 @@ object DownloadServiceHost {
             preferences.getString(KEY_WAITING_FOR_STORAGE, DEFAULT_WAITING_FOR_STORAGE)
                     ?: DEFAULT_WAITING_FOR_STORAGE,
             preferences.getString(KEY_DOWNLOADS, DEFAULT_DOWNLOADS) ?: DEFAULT_DOWNLOADS,
-            preferences.getString(KEY_CANCEL, DEFAULT_CANCEL) ?: DEFAULT_CANCEL)
+            preferences.getString(KEY_CANCEL, DEFAULT_CANCEL) ?: DEFAULT_CANCEL,
+            preferences.getString(KEY_STORAGE_FAILURE, DEFAULT_STORAGE_FAILURE) ?: DEFAULT_STORAGE_FAILURE)
   }
 
   fun attachService(downloadService: DownloadService) {
@@ -216,10 +220,12 @@ object DownloadServiceHost {
   private const val KEY_WAITING_FOR_STORAGE = "waiting_for_storage"
   private const val KEY_DOWNLOADS = "downloads"
   private const val KEY_CANCEL = "cancel"
+  private const val KEY_STORAGE_FAILURE = "storage_failure"
   private const val DEFAULT_PREPARING = "Preparing downloads"
   private const val DEFAULT_DOWNLOADING_FILE = "Downloading {0}"
   private const val DEFAULT_WAITING_FOR_STORAGE = "Waiting for available storage"
   private const val DEFAULT_DOWNLOADS = "Downloads"
   private const val DEFAULT_CANCEL = "Cancel"
+  private const val DEFAULT_STORAGE_FAILURE = "Download stopped: not enough free space. Free {0} and retry."
   private const val TAG = "DownloadServiceHost"
 }

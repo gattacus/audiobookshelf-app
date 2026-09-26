@@ -141,8 +141,10 @@ class InternalDownloadManager(
                         while (true) {
                           val read = input.read(buffer)
                           if (read < 0) break
-                          if (!hasAvailableSpace())
-                                  throw IOException("Download paused to preserve free storage")
+                          if (!hasAvailableSpace()) {
+                            progressCallback.onInsufficientSpace()
+                            return
+                          }
                           output.write(buffer, 0, read)
                           totalBytes += read
                           val progress =

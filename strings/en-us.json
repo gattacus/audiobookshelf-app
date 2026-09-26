@@ -1,4 +1,7 @@
 {
+  "ButtonRetryDownload": "Retry download",
+  "LabelDownloadFailed": "Download stopped",
+  "MessageDownloadStoppedStorage": "Download stopped: not enough free space. Free {0} and retry.",
   "ButtonAdd": "Add",
   "ButtonAddNewServer": "Add New Server",
   "ButtonAllow": "Allow",

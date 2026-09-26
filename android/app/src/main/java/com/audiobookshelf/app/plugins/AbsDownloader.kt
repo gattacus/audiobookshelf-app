@@ -62,7 +62,8 @@ class AbsDownloader : Plugin() {
             call.getString("downloadingFile") ?: "Downloading {0}",
             call.getString("waitingForStorage") ?: "Waiting for available storage",
             call.getString("downloads") ?: "Downloads",
-            call.getString("cancel") ?: "Cancel")
+            call.getString("cancel") ?: "Cancel",
+            call.getString("storageFailure") ?: "Download stopped: not enough free space. Free {0} and retry.")
     call.resolve()
   }
 
@@ -73,6 +74,20 @@ class AbsDownloader : Plugin() {
     if (call.getString("eventName") == "onDownloadItem" && ::downloadItemManager.isInitialized) {
       downloadItemManager.downloadItemQueue.forEach { item ->
         notifyListeners("onDownloadItem", JSObject(jacksonMapper.writeValueAsString(item)))
+      }
+    }
+  }
+
+  @PluginMethod
+  fun retryDownloadItem(call: PluginCall) {
+    val id = call.getString("downloadItemId") ?: return call.reject("Missing download item ID")
+    DownloadServiceHost.retryExisting(mainActivity, id) { result ->
+      when (result) {
+        DownloadServiceHost.ExistingDownloadResult.RETRIED -> call.resolve()
+        DownloadServiceHost.ExistingDownloadResult.NOT_FOUND -> call.reject("Download no longer exists")
+        DownloadServiceHost.ExistingDownloadResult.ACTIVE -> call.reject("Download is already active")
+        DownloadServiceHost.ExistingDownloadResult.SERVICE_START_FAILED ->
+                call.reject("Unable to start the Android download service")
       }
     }
   }
