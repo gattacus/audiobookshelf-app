@@ -8,6 +8,10 @@
       </div>
       <p class="pl-4">{{ $strings.LabelUseBookshelfView }}</p>
     </div>
+    <button v-if="!isiOS" type="button" class="w-full flex items-center justify-between py-3 text-left" @click="showHomeSectionsModal = true">
+      <span>{{ $strings.LabelHomeSections }}</span>
+      <span class="material-symbols" aria-hidden="true">chevron_right</span>
+    </button>
     <!-- screen.orientation.lock not supported on iOS webview -->
     <div v-if="!isiOS" class="flex items-center py-3">
       <div class="w-10 flex justify-center" @click.stop="toggleLockOrientation">
@@ -180,6 +184,7 @@
     </div>
 
     <modals-dialog v-model="showMoreMenuDialog" :items="moreMenuItems" :selected="moreMenuSelected" @action="clickMenuAction" />
+    <modals-home-sections-modal v-if="!isiOS" v-model="showHomeSectionsModal" :hidden="hiddenHomeSections" @toggle="toggleHomeSection" />
     <modals-sleep-timer-length-modal v-model="showSleepTimerLengthModal" @change="sleepTimerLengthModalSelection" />
     <modals-auto-sleep-timer-rewind-length-modal v-model="showAutoSleepTimerRewindLengthModal" @change="showAutoSleepTimerRewindLengthModalSelection" />
   </div>
@@ -188,6 +193,7 @@
 <script>
 import { Dialog } from '@capacitor/dialog'
 import jumpLabelMixin from '@/mixins/jumpLabel'
+import { normalizeHiddenHomeSections } from '@/utils/homeSections'
 
 export default {
   mixins: [jumpLabelMixin],
@@ -196,6 +202,7 @@ export default {
       loading: false,
       deviceData: null,
       showMoreMenuDialog: false,
+      showHomeSectionsModal: false,
       showSleepTimerLengthModal: false,
       showAutoSleepTimerRewindLengthModal: false,
       moreMenuSetting: '',
@@ -342,6 +349,9 @@ export default {
     }
   },
   computed: {
+    hiddenHomeSections() {
+      return normalizeHiddenHomeSections(this.$store.state.user.settings.hiddenHomeSections)
+    },
     // This is flipped because alt view was the default until v0.9.61-beta
     enableBookshelfView: {
       get() {
@@ -627,6 +637,12 @@ export default {
       }
       this.$setOrientationLock(this.settings.lockOrientation)
       this.saveSettings()
+    },
+    async toggleHomeSection(id) {
+      const hidden = this.hiddenHomeSections
+      const updated = hidden.includes(id) ? hidden.filter((sectionId) => sectionId !== id) : [...hidden, id]
+      await this.$store.dispatch('user/updateUserSettings', { hiddenHomeSections: updated })
+      await this.$hapticsImpact()
     },
     async saveSettings() {
       await this.$hapticsImpact()

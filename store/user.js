@@ -1,6 +1,7 @@
 import { Browser } from '@capacitor/browser'
 import { AbsLogger } from '@/plugins/capacitor'
 import { CapacitorHttp } from '@capacitor/core'
+import { normalizeHiddenHomeSections } from '@/utils/homeSections'
 
 export const state = () => ({
   user: null,
@@ -15,7 +16,8 @@ export const state = () => ({
     collapseBookSeries: false,
     podcastEpisodesOrderBy: 'publishedAt',
     podcastEpisodesOrderDesc: null,
-    podcastEpisodesFilterBy: 'incomplete'
+    podcastEpisodesFilterBy: 'incomplete',
+    hiddenHomeSections: []
   }
 })
 
@@ -107,6 +109,7 @@ export const actions = {
       }
     }
     if (hasChanges) {
+      existingSettings.hiddenHomeSections = normalizeHiddenHomeSections(existingSettings.hiddenHomeSections)
       commit('setSettings', existingSettings)
       await this.$localStore.setUserSettings(existingSettings)
       this.$eventBus.$emit('user-settings', state.settings)
@@ -122,6 +125,7 @@ export const actions = {
           userSettings[key] = userSettingsFromLocal[key]
         }
       }
+      userSettings.hiddenHomeSections = normalizeHiddenHomeSections(userSettings.hiddenHomeSections)
       commit('setSettings', userSettings)
       this.$eventBus.$emit('user-settings', state.settings)
     }

@@ -10,9 +10,14 @@
     </div>
 
     <div class="w-full" :class="{ 'py-6': altViewEnabled }">
-      <template v-for="(shelf, index) in shelves">
-        <bookshelf-shelf :key="shelf.id" :label="getShelfLabel(shelf)" :entities="shelf.entities" :type="shelf.type" :style="{ zIndex: shelves.length - index }" />
+      <template v-for="(shelf, index) in visibleShelves">
+        <bookshelf-shelf :key="shelf.id" :label="getShelfLabel(shelf)" :entities="shelf.entities" :type="shelf.type" :style="{ zIndex: visibleShelves.length - index }" />
       </template>
+    </div>
+
+    <div v-if="shelves.length && !visibleShelves.length && !isLoading" class="p-8 text-center">
+      <p class="mb-4">{{ $strings.MessageHomeSectionsHidden }}</p>
+      <ui-btn @click="$router.push('/settings')">{{ $strings.LabelHomeSections }}</ui-btn>
     </div>
 
     <div v-if="!shelves.length && !isLoading" class="absolute top-0 left-0 w-full h-full flex items-center justify-center">
@@ -38,6 +43,8 @@
 </template>
 
 <script>
+import { visibleHomeShelves } from '@/utils/homeSections'
+
 export default {
   props: {},
   data() {
@@ -83,6 +90,10 @@ export default {
     }
   },
   computed: {
+    visibleShelves() {
+      if (this.isIos) return this.shelves
+      return visibleHomeShelves(this.shelves, this.$store.state.user.settings.hiddenHomeSections)
+    },
     user() {
       return this.$store.state.user.user
     },
