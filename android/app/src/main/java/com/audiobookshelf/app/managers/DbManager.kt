@@ -7,6 +7,7 @@ import com.audiobookshelf.app.models.DownloadItem
 import com.audiobookshelf.app.plugins.AbsLog
 import com.audiobookshelf.app.plugins.AbsLogger
 import io.paperdb.Paper
+import java.util.UUID
 
 class DbManager {
   val tag = "DbManager"
@@ -113,10 +114,40 @@ class DbManager {
     Paper.book("downloadItems").delete(downloadItemId)
   }
 
+  @Synchronized
   fun getDownloadItems(): List<DownloadItem> {
     val downloadItems: MutableList<DownloadItem> = mutableListOf()
-    Paper.book("downloadItems").allKeys.forEach { downloadItemId ->
-      Paper.book("downloadItems").read<DownloadItem>(downloadItemId)?.let { downloadItems.add(it) }
+    val book = Paper.book("downloadItems")
+    book.allKeys.forEach { downloadItemId ->
+      val item = book.read<DownloadItem>(downloadItemId) ?: return@forEach
+      // Paper bypasses Kotlin constructors: fields absent from older records can be null even
+      // when declared non-null. All newly added nullable/primitive fields have usable defaults,
+      // but destinationPath is required by restoration, cancellation and expired cleanup.
+      if (item.downloadItemParts.any { part ->
+            val path: String? = part.destinationPath
+            path.isNullOrBlank()
+          }) {
+        try {
+          // Preserve the whole record before removing it from the active queue. Do not cancel
+          // legacy DownloadManager IDs: that can delete their files, including completed media.
+          Paper.book("incompatibleDownloadItems")
+                  .write("$downloadItemId-${UUID.randomUUID()}", item)
+          book.delete(downloadItemId)
+          val message = "Saved incompatible download queue item $downloadItemId in " +
+                  "incompatibleDownloadItems; requeue it to download again. Media files were preserved."
+          try {
+            AbsLogger.error(tag, message)
+          } catch (e: RuntimeException) {
+            Log.e(tag, message, e)
+          }
+        } catch (e: RuntimeException) {
+          // If storage is unavailable, leave the original record intact and exclude it from
+          // this read so startup can still proceed. A later read will retry quarantine.
+          Log.e(tag, "Could not quarantine download item $downloadItemId; leaving it stored", e)
+        }
+      } else {
+        downloadItems.add(item)
+      }
     }
     return downloadItems
   }

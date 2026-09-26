@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Keep the badge clear of the headphone outline in themed icons. -->
+    <group>
+        <clip-path android:fillType="evenOdd"
+            android:pathData="M0,0 H108 V108 H0 Z M68,54 A14,14 0,1 1,68 82 A14,14 0,1 1,68 54 Z" />
+        <group android:rotation="180" android:pivotX="54" android:pivotY="54">
+        <path android:fillColor="#FF000000"
+            android:pathData="M37,29 H71 Q73,29 73,31 Q73,33 71,33 H37 Q35,33 35,31 Q35,29 37,29 Z M41,34 H49 V67 H41 Z M50,34 H58 V67 H50 Z M59,34 H67 V67 H59 Z M31,46 H38 V61 H31 Z M70,46 H77 V61 H70 Z" />
+        <path android:fillColor="#00000000" android:strokeColor="#FF000000"
+            android:strokeWidth="4" android:strokeLineCap="round"
+            android:pathData="M34,48 V62 C34,86 74,86 74,62 V48" />
+        </group>
+    </group>
+    <path android:fillColor="#FF000000" android:fillType="evenOdd"
+        android:pathData="M68,55 A13,13 0,1 1,68 81 A13,13 0,1 1,68 55 Z M63,60 L74,60 L74,63 L66,63 L66,66 L72,66 L72,69 L66,69 L66,76 L63,76 Z" />
+</vector>
