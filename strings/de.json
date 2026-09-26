@@ -1,4 +1,12 @@
 {
+  "ButtonSelectEpisodes": "Episoden auswählen",
+  "ButtonSelectAll": "Alle auswählen",
+  "ButtonClearSelection": "Auswahl aufheben",
+  "ButtonDeleteSelectedFiles": "Ausgewählte Dateien löschen",
+  "LabelEpisodesSelected": "Ausgewählte Episoden: {0}",
+  "MessageConfirmDeleteEpisodeFiles": "Die ausgewählten lokalen Episodendateien ({0}) vom Gerät entfernen? Dateien auf dem Server und der Hörfortschritt bleiben erhalten.",
+  "MessageDeletedEpisodeFiles": "Gelöschte Episodendateien: {0}",
+  "MessageFailedDeleteEpisodeFiles": "Nicht gelöschte Episodendateien: {0}. Sie bleiben für einen erneuten Versuch ausgewählt.",
   "ButtonRetryDownload": "Download erneut versuchen",
   "LabelDownloadFailed": "Download angehalten",
   "MessageDownloadStoppedStorage": "Download angehalten: Nicht genug freier Speicherplatz. Gib {0} frei und versuche es erneut.",

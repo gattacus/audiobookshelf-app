@@ -1,4 +1,12 @@
 {
+  "ButtonSelectEpisodes": "Select episodes",
+  "ButtonSelectAll": "Select all",
+  "ButtonClearSelection": "Clear selection",
+  "ButtonDeleteSelectedFiles": "Delete selected files",
+  "LabelEpisodesSelected": "Selected episodes: {0}",
+  "MessageConfirmDeleteEpisodeFiles": "Remove the selected local episode files ({0}) from your device? Server files and listening progress will be unaffected.",
+  "MessageDeletedEpisodeFiles": "Deleted episode files: {0}",
+  "MessageFailedDeleteEpisodeFiles": "Failed to delete episode files: {0}. They remain selected; you can retry.",
   "ButtonRetryDownload": "Retry download",
   "LabelDownloadFailed": "Download stopped",
   "MessageDownloadStoppedStorage": "Download stopped: not enough free space. Free {0} and retry.",

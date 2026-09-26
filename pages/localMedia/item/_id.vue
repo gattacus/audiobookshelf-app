@@ -8,7 +8,7 @@
         <button v-if="audioTracks.length && !isPodcast" class="shadow-sm text-success flex items-center justify-center rounded-full mx-2" @click.stop="play">
           <span class="material-symbols fill" style="font-size: 2rem">play_arrow</span>
         </button>
-        <span class="material-symbols text-2xl" @click="showItemDialog">more_vert</span>
+        <span v-if="!deletingEpisodes" class="material-symbols text-2xl" @click="showItemDialog">more_vert</span>
       </div>
 
       <p v-if="!isIos" class="px-2 text-sm mb-0.5 text-fg-muted">{{ $strings.LabelFolder }}: {{ folderName }}</p>
@@ -53,19 +53,31 @@
             <p class="text-base">Episodes ({{ episodes.length }})</p>
             <p class="text-xs text-fg-muted px-2">{{ $strings.LabelTotalSize }}: {{ $bytesPretty(totalEpisodesSize) }}</p>
           </div>
+          <div v-if="isAndroid && episodes.length" class="flex flex-wrap items-center gap-2 mb-2">
+            <ui-btn v-if="!selectingEpisodes" small @click="selectingEpisodes = true">{{ $strings.ButtonSelectEpisodes }}</ui-btn>
+            <template v-else>
+              <p class="text-sm w-full" role="status">{{ $getString('LabelEpisodesSelected', [selectedEpisodes.length]) }}</p>
+              <ui-btn small :disabled="deletingEpisodes" @click="toggleAllEpisodes">{{ allEpisodesSelected ? $strings.ButtonClearSelection : $strings.ButtonSelectAll }}</ui-btn>
+              <ui-btn small color="error" :disabled="!selectedEpisodes.length" :loading="deletingEpisodes" @click="deleteSelectedEpisodes">{{ $strings.ButtonDeleteSelectedFiles }}</ui-btn>
+              <ui-btn small :disabled="deletingEpisodes" @click="cancelEpisodeSelection">{{ $strings.ButtonCancel }}</ui-btn>
+            </template>
+          </div>
           <template v-for="episode in episodes">
             <div :key="episode.id" class="flex items-center my-1">
-              <div class="w-10 h-12 flex items-center justify-center" style="min-width: 48px">
+              <label v-if="selectingEpisodes" class="w-12 h-12 flex items-center justify-center" style="min-width: 48px">
+                <input type="checkbox" class="w-5 h-5" :checked="selectedEpisodeIds.includes(episode.id)" :disabled="deletingEpisodes" :aria-label="episode.title" @change="toggleEpisodeSelection(episode.id)" />
+              </label>
+              <div v-else class="w-10 h-12 flex items-center justify-center" style="min-width: 48px">
                 <p class="font-mono font-bold text-xl">{{ episode.index }}</p>
               </div>
-              <div class="flex-grow px-2">
+              <div class="flex-grow px-2" @click="selectingEpisodes && toggleEpisodeSelection(episode.id)">
                 <p class="text-xs">{{ episode.title }}</p>
               </div>
               <div class="w-20 text-center text-fg-muted" style="min-width: 80px">
                 <p class="text-xs">{{ episode.audioTrack.mimeType }}</p>
                 <p class="text-sm">{{ $elapsedPretty(episode.audioTrack.duration) }}</p>
               </div>
-              <div class="w-12 h-12 flex items-center justify-center" style="min-width: 48px">
+              <div v-if="!selectingEpisodes" class="w-12 h-12 flex items-center justify-center" style="min-width: 48px">
                 <span class="material-symbols text-2xl" @click="showTrackDialog(episode)">more_vert</span>
               </div>
             </div>
@@ -161,6 +173,9 @@ export default {
       showDialog: false,
       selectedAudioTrack: null,
       selectedEpisode: null,
+      selectingEpisodes: false,
+      selectedEpisodeIds: [],
+      deletingEpisodes: false,
       orderChanged: false
     }
   },
@@ -170,6 +185,9 @@ export default {
     },
     isIos() {
       return this.$platform === 'ios'
+    },
+    isAndroid() {
+      return this.$platform === 'android'
     },
     basePath() {
       return this.localLibraryItem?.basePath
@@ -219,7 +237,13 @@ export default {
       return this.localFiles.find((lf) => lf.id == this.ebookFile.localFileId)
     },
     episodes() {
-      return this.media.episodes || []
+      return this.media?.episodes || []
+    },
+    selectedEpisodes() {
+      return this.episodes.filter((episode) => this.selectedEpisodeIds.includes(episode.id))
+    },
+    allEpisodesSelected() {
+      return this.episodes.length > 0 && this.selectedEpisodes.length === this.episodes.length
     },
     audioTracks() {
       if (!this.media) return []
@@ -303,11 +327,13 @@ export default {
       this.orderChanged = false
     },
     showItemDialog() {
+      if (this.deletingEpisodes) return
       this.selectedAudioTrack = null
       this.selectedEpisode = null
       this.showDialog = true
     },
     showTrackDialog(track) {
+      if (this.deletingEpisodes) return
       if (this.isPodcast) {
         this.selectedAudioTrack = null
         this.selectedEpisode = track
@@ -355,6 +381,65 @@ export default {
     },
     getLocalFileForTrack(localFileId) {
       return this.localFiles.find((lf) => lf.id == localFileId)
+    },
+    toggleEpisodeSelection(episodeId) {
+      if (this.deletingEpisodes) return
+      if (this.selectedEpisodeIds.includes(episodeId)) {
+        this.selectedEpisodeIds = this.selectedEpisodeIds.filter((id) => id !== episodeId)
+      } else {
+        this.selectedEpisodeIds = [...this.selectedEpisodeIds, episodeId]
+      }
+    },
+    toggleAllEpisodes() {
+      if (this.deletingEpisodes) return
+      this.selectedEpisodeIds = this.allEpisodesSelected ? [] : this.episodes.map((episode) => episode.id)
+    },
+    cancelEpisodeSelection() {
+      if (this.deletingEpisodes) return
+      this.selectedEpisodeIds = []
+      this.selectingEpisodes = false
+    },
+    async deleteSelectedEpisodes() {
+      if (!this.isAndroid || this.deletingEpisodes || !this.selectedEpisodes.length) return
+      const episodeIds = this.selectedEpisodes.map((episode) => episode.id)
+      // Lock selection before opening the confirmation to prevent duplicate requests.
+      this.deletingEpisodes = true
+      let deletedCount = 0
+      try {
+        const { value } = await Dialog.confirm({
+          title: this.$strings.HeaderConfirm,
+          message: this.$getString('MessageConfirmDeleteEpisodeFiles', [episodeIds.length])
+        })
+        if (!value) return
+
+        // Each native call restores and saves the same item. Await each updated record
+        // before deleting the next file so one save cannot restore an earlier episode.
+        for (const episodeId of episodeIds) {
+          const episode = this.episodes.find((episode) => episode.id === episodeId)
+          const track = episode?.audioTrack
+          const localFile = track?.localFileId && this.getLocalFileForTrack(track.localFileId)
+          if (!localFile || !track.contentUrl || localFile.contentUrl !== track.contentUrl) continue
+          try {
+            const res = await AbsFileSystem.deleteTrackFromItem({ id: this.localLibraryItem.id, trackLocalFileId: localFile.id, trackContentUrl: track.contentUrl })
+            if (res?.id === this.localLibraryItem.id) {
+              this.localLibraryItem = res
+              this.selectedEpisodeIds = this.selectedEpisodeIds.filter((id) => id !== episodeId)
+              deletedCount++
+            }
+          } catch (error) {
+            console.error('Failed to delete selected episode', error)
+          }
+        }
+        if (deletedCount) this.$toast.success(this.$getString('MessageDeletedEpisodeFiles', [deletedCount]))
+        const failedCount = episodeIds.length - deletedCount
+        if (failedCount) this.$toast.error(this.$getString('MessageFailedDeleteEpisodeFiles', [failedCount]))
+        else this.selectingEpisodes = false
+      } catch (error) {
+        console.error('Failed to confirm episode deletion', error)
+        this.$toast.error(this.$getString('MessageFailedDeleteEpisodeFiles', [episodeIds.length]))
+      } finally {
+        this.deletingEpisodes = false
+      }
     },
     async deleteEpisode() {
       if (!this.selectedEpisode) return
