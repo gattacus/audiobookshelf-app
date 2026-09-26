@@ -91,3 +91,11 @@ sw.*
 
 /resources/
 /android/app/release/
+
+docs
+scripts
+AGENTS.md
+
+# Python bytecode
+__pycache__/
+*.py[cod]
