@@ -44,7 +44,9 @@ export default function ({ store, $db, $socket }, inject) {
         if (res.status >= 400) {
           console.error(`[nativeHttp] ${res.status} status for url "${url}"`)
           const message = typeof res.data === 'string' ? res.data : `HTTP ${res.status}`
-          throw new Error(message)
+          const error = new Error(message)
+          error.status = res.status
+          throw error
         }
         return res.data
       })

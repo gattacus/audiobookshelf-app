@@ -1,6 +1,6 @@
 <template>
   <div class="w-full h-full min-h-full relative">
-    <div v-if="attemptingConnection" class="w-full pt-4 flex items-center justify-center">
+    <div v-if="showConnectionAttempt" class="w-full pt-4 flex items-center justify-center">
       <widgets-loading-spinner />
       <p class="pl-4">{{ $strings.MessageAttemptingServerConnection }}</p>
     </div>
@@ -123,6 +123,9 @@ export default {
     },
     attemptingConnection() {
       return this.$store.state.attemptingConnection
+    },
+    showConnectionAttempt() {
+      return this.attemptingConnection && !(this.$platform === 'android' && this.$store.state.connectionAttemptIsBackground)
     }
   },
   methods: {

@@ -12,6 +12,7 @@ export const state = () => ({
   isCasting: false,
   isCastAvailable: false,
   attemptingConnection: false,
+  connectionAttemptIsBackground: false,
   socketConnected: false,
   networkConnected: false,
   networkConnectionType: null,
@@ -148,6 +149,9 @@ export const mutations = {
   },
   setAttemptingConnection(state, val) {
     state.attemptingConnection = val
+  },
+  setConnectionAttemptIsBackground(state, val) {
+    state.connectionAttemptIsBackground = val
   },
   setPlayerPlaying(state, val) {
     state.playerIsPlaying = val

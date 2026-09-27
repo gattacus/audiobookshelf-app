@@ -26,12 +26,19 @@ export default {
       disconnectTime: 0,
       socketDisconnectedTime: 0,
       timeLostFocus: 0,
+      connectionRetryTimer: null,
+      connectionRetryAttempt: 0,
+      connectionRetryStopped: false,
       currentLang: null
     }
   },
   watch: {
+    user(user) {
+      if (user) this.cancelConnectionRetry()
+    },
     networkConnected: {
       handler(newVal, oldVal) {
+        if (!newVal) this.cancelConnectionRetry()
         if (!this.hasMounted) {
           // watcher runs before mount, handling libraries/connection should be handled in mount
           return
@@ -112,6 +119,24 @@ export default {
     }
   },
   methods: {
+    cancelConnectionRetry(resetAttempts = true) {
+      if (this.connectionRetryTimer !== null) clearTimeout(this.connectionRetryTimer)
+      this.connectionRetryTimer = null
+      if (resetAttempts) this.connectionRetryAttempt = 0
+    },
+    scheduleConnectionRetry() {
+      if (this.$platform !== 'android' || this.connectionRetryStopped || !this.networkConnected || this.user || this.connectionRetryTimer !== null) return
+
+      // A network interface may return before DNS or the server is reachable.
+      // Retry independently of the network boolean, which can stay true throughout.
+      const delay = Math.min(2000 * 2 ** this.connectionRetryAttempt, 15000)
+      this.connectionRetryAttempt = Math.min(this.connectionRetryAttempt + 1, 3)
+      AbsLogger.info({ tag: 'default', message: `attemptConnection: Retry scheduled in ${delay}ms` })
+      this.connectionRetryTimer = setTimeout(() => {
+        this.connectionRetryTimer = null
+        if (this.networkConnected && !this.user) return this.attemptConnection(true)
+      }, delay)
+    },
     initialStream(stream) {
       if (this.$refs.streamContainer?.audioPlayerReady) {
         this.$refs.streamContainer.streamOpen(stream)
@@ -125,8 +150,9 @@ export default {
 
       await this.$store.dispatch('user/loadUserSettings')
     },
-    async attemptConnection() {
+    async attemptConnection(background = false) {
       console.warn('[default] attemptConnection')
+      if (this.$platform === 'android' && (this.user || this.connectionRetryStopped)) return
       if (!this.networkConnected) {
         console.warn('[default] No network connection')
         AbsLogger.info({ tag: 'default', message: 'attemptConnection: No network connection' })
@@ -135,83 +161,94 @@ export default {
       if (this.attemptingConnection) {
         return
       }
+      this.cancelConnectionRetry(false)
+      this.$store.commit('setConnectionAttemptIsBackground', this.$platform === 'android' && background)
       this.attemptingConnection = true
 
-      const deviceData = await this.$db.getDeviceData()
-      let serverConfig = null
-      if (deviceData) {
-        this.$store.commit('globals/setHapticFeedback', deviceData.deviceSettings?.hapticFeedback)
+      try {
+        const deviceData = await this.$db.getDeviceData()
+        let serverConfig = null
+        if (deviceData) {
+          this.$store.commit('globals/setHapticFeedback', deviceData.deviceSettings?.hapticFeedback)
 
-        if (deviceData.lastServerConnectionConfigId && deviceData.serverConnectionConfigs.length) {
-          serverConfig = deviceData.serverConnectionConfigs.find((scc) => scc.id == deviceData.lastServerConnectionConfigId)
+          if (deviceData.lastServerConnectionConfigId && deviceData.serverConnectionConfigs.length) {
+            serverConfig = deviceData.serverConnectionConfigs.find((scc) => scc.id == deviceData.lastServerConnectionConfigId)
+          }
         }
-      }
 
-      if (!serverConfig) {
-        // No last server config set
-        this.attemptingConnection = false
-        AbsLogger.info({ tag: 'default', message: 'attemptConnection: No last server config set' })
-        return
-      }
-
-      AbsLogger.info({ tag: 'default', message: `attemptConnection: Got server config, attempt authorize (${serverConfig.name})` })
-
-      const nativeHttpOptions = {
-        headers: {
-          Authorization: `Bearer ${serverConfig.token}`
-        },
-        connectTimeout: 6000,
-        serverConnectionConfig: serverConfig
-      }
-      const authRes = await this.$nativeHttp.post(`${serverConfig.address}/api/authorize`, null, nativeHttpOptions).catch((error) => {
-        AbsLogger.error({ tag: 'default', message: `attemptConnection: Server auth failed (${serverConfig.name})` })
-        return false
-      })
-
-      if (!authRes) {
-        this.attemptingConnection = false
-        return
-      }
-
-      const { user, userDefaultLibraryId, serverSettings, ereaderDevices } = authRes
-      this.$store.commit('setServerSettings', serverSettings)
-      this.$store.commit('libraries/setEReaderDevices', ereaderDevices)
-
-      if (this.$isValidVersion(serverSettings.version, '2.26.0')) {
-        // Check if the server is using the new JWT auth and is still using an old token in the server config
-        // If so, redirect to /connect and request to re-login
-        if (serverConfig.token === user.token || user.isOldToken) {
-          this.attemptingConnection = false
-          AbsLogger.info({ tag: 'default', message: `attemptConnection: Server is using new JWT auth but config is still using an old token (server version: ${serverSettings.version}) (${serverConfig.name})` })
-          // Clear last server config
-          await this.$store.dispatch('user/logout')
-          this.$router.push(`/connect?error=oldAuthToken&serverConnectionConfigId=${serverConfig.id}`)
+        if (!serverConfig) {
+          // No last server config set
+          this.cancelConnectionRetry()
+          AbsLogger.info({ tag: 'default', message: 'attemptConnection: No last server config set' })
           return
         }
 
-        // Token may have been refreshed during the authorize call so refetch from store
-        serverConfig.token = this.$store.getters['user/getToken'] || serverConfig.token
+        AbsLogger.info({ tag: 'default', message: `attemptConnection: Got server config, attempt authorize (${serverConfig.name})` })
+
+        const nativeHttpOptions = {
+          headers: {
+            Authorization: `Bearer ${serverConfig.token}`
+          },
+          connectTimeout: 6000,
+          ...(this.$platform === 'android' ? { readTimeout: 6000 } : {}),
+          serverConnectionConfig: serverConfig
+        }
+        let retryConnection = false
+        const authRes = await this.$nativeHttp.post(`${serverConfig.address}/api/authorize`, null, nativeHttpOptions).catch((error) => {
+          const status = error?.status
+          retryConnection = !status || status === 408 || status === 429 || status >= 500
+          AbsLogger.error({ tag: 'default', message: `attemptConnection: Server auth failed (${serverConfig.name})` })
+          return false
+        })
+
+        if (!authRes) {
+          if (retryConnection) this.scheduleConnectionRetry()
+          else this.cancelConnectionRetry()
+          return
+        }
+
+        const { user, userDefaultLibraryId, serverSettings, ereaderDevices } = authRes
+        this.$store.commit('setServerSettings', serverSettings)
+        this.$store.commit('libraries/setEReaderDevices', ereaderDevices)
+
+        if (this.$isValidVersion(serverSettings.version, '2.26.0')) {
+          // Check if the server is using the new JWT auth and is still using an old token in the server config
+          // If so, redirect to /connect and request to re-login
+          if (serverConfig.token === user.token || user.isOldToken) {
+            AbsLogger.info({ tag: 'default', message: `attemptConnection: Server is using new JWT auth but config is still using an old token (server version: ${serverSettings.version}) (${serverConfig.name})` })
+            // Clear last server config
+            await this.$store.dispatch('user/logout')
+            this.$router.push(`/connect?error=oldAuthToken&serverConnectionConfigId=${serverConfig.id}`)
+            return
+          }
+
+          // Token may have been refreshed during the authorize call so refetch from store
+          serverConfig.token = this.$store.getters['user/getToken'] || serverConfig.token
+        }
+
+        // Set library - Use last library if set and available fallback to default user library
+        const lastLibraryId = await this.$localStore.getLastLibraryId()
+        if (lastLibraryId && (!user.librariesAccessible.length || user.librariesAccessible.includes(lastLibraryId))) {
+          this.$store.commit('libraries/setCurrentLibrary', lastLibraryId)
+        } else if (userDefaultLibraryId) {
+          this.$store.commit('libraries/setCurrentLibrary', userDefaultLibraryId)
+        }
+        serverConfig.version = serverSettings.version
+        const serverConnectionConfig = await this.$db.setServerConnectionConfig(serverConfig)
+
+        this.$store.commit('user/setUser', user)
+        this.$store.commit('user/setAccessToken', serverConnectionConfig.token)
+        this.$store.commit('user/setServerConnectionConfig', serverConnectionConfig)
+
+        this.cancelConnectionRetry()
+        this.$socket.connect(serverConnectionConfig.address, serverConnectionConfig.token)
+
+        AbsLogger.info({ tag: 'default', message: `attemptConnection: Successful connection to last saved server config (${serverConnectionConfig.name})` })
+        await this.initLibraries()
+      } finally {
+        this.attemptingConnection = false
+        this.$store.commit('setConnectionAttemptIsBackground', false)
       }
-
-      // Set library - Use last library if set and available fallback to default user library
-      const lastLibraryId = await this.$localStore.getLastLibraryId()
-      if (lastLibraryId && (!user.librariesAccessible.length || user.librariesAccessible.includes(lastLibraryId))) {
-        this.$store.commit('libraries/setCurrentLibrary', lastLibraryId)
-      } else if (userDefaultLibraryId) {
-        this.$store.commit('libraries/setCurrentLibrary', userDefaultLibraryId)
-      }
-      serverConfig.version = serverSettings.version
-      const serverConnectionConfig = await this.$db.setServerConnectionConfig(serverConfig)
-
-      this.$store.commit('user/setUser', user)
-      this.$store.commit('user/setAccessToken', serverConnectionConfig.token)
-      this.$store.commit('user/setServerConnectionConfig', serverConnectionConfig)
-
-      this.$socket.connect(serverConnectionConfig.address, serverConnectionConfig.token)
-
-      AbsLogger.info({ tag: 'default', message: `attemptConnection: Successful connection to last saved server config (${serverConnectionConfig.name})` })
-      await this.initLibraries()
-      this.attemptingConnection = false
     },
     itemRemoved(libraryItem) {
       if (this.$route.name.startsWith('item')) {
@@ -385,6 +422,8 @@ export default {
     }
   },
   beforeDestroy() {
+    this.connectionRetryStopped = true
+    this.cancelConnectionRetry()
     this.$eventBus.$off('change-lang', this.changeLanguage)
     document.removeEventListener('visibilitychange', this.visibilityChanged)
     this.$socket.off('user_updated', this.userUpdated)
