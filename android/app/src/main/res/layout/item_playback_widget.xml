@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/itemWidgetBackground"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/app_widget_background">
+    <ImageView
+        android:id="@+id/itemWidgetCover"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@null"
+        android:scaleType="centerCrop" />
+    <TextView
+        android:id="@+id/itemWidgetTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:ellipsize="end"
+        android:gravity="center"
+        android:maxLines="3"
+        android:padding="6dp"
+        android:textColor="#F7DFBB"
+        android:textSize="11sp" />
+    <FrameLayout
+        android:id="@+id/itemWidgetStatusBadge"
+        android:layout_width="28dp"
+        android:layout_height="28dp"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="4dp"
+        android:background="@drawable/item_widget_play_background">
+        <ImageView
+            android:id="@+id/itemWidgetPlayIcon"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_gravity="center"
+            android:contentDescription="@null"
+            android:src="@android:drawable/ic_media_play" />
+        <ProgressBar
+            android:id="@+id/itemWidgetSpinner"
+            style="?android:attr/progressBarStyleSmall"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_gravity="center"
+            android:contentDescription="@null"
+            android:indeterminate="true"
+            android:indeterminateTint="#FFFFFF"
+            android:visibility="gone" />
+        <ImageView
+            android:id="@+id/itemWidgetPlayingIcon"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_gravity="center"
+            android:contentDescription="@null"
+            android:src="@drawable/item_widget_equalizer"
+            android:visibility="gone" />
+        <ImageView
+            android:id="@+id/itemWidgetErrorIcon"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_gravity="center"
+            android:contentDescription="@null"
+            android:src="@drawable/item_widget_error"
+            android:visibility="gone" />
+    </FrameLayout>
+</FrameLayout>

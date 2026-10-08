@@ -6,6 +6,7 @@ import com.audiobookshelf.app.data.PlayerState
 import com.audiobookshelf.app.device.DeviceManager
 import com.google.android.exoplayer2.PlaybackException
 import com.google.android.exoplayer2.Player
+import com.audiobookshelf.app.ItemPlaybackWidget
 
 //const val PAUSE_LEN_BEFORE_RECHECK = 30000 // 30 seconds
 
@@ -112,6 +113,7 @@ class PlayerListener(var playerNotificationService:PlayerNotificationService) : 
     }
 
     playerNotificationService.clientEventEmitter?.onPlayingUpdate(isPlaying)
+    ItemPlaybackWidget.syncPlayback(playerNotificationService)
   }
 
   override fun onEvents(player: Player, events: Player.Events) {

@@ -2,8 +2,16 @@ package com.audiobookshelf.app.plugins
 
 import android.os.Handler
 import android.os.Looper
+import android.os.Build
+import android.os.SystemClock
+import android.app.PendingIntent
+import android.appwidget.AppWidgetManager
+import android.content.ComponentName
+import android.content.Intent
 import android.util.Log
 import com.audiobookshelf.app.MainActivity
+import com.audiobookshelf.app.ItemPlaybackWidget
+import com.audiobookshelf.app.WidgetTarget
 import com.audiobookshelf.app.data.*
 import com.audiobookshelf.app.device.DeviceManager
 import com.audiobookshelf.app.media.MediaEventManager
@@ -35,6 +43,40 @@ class AbsAudioPlayer : Plugin() {
 
   // Track foreground state to avoid flooding WebView with events while backgrounded
   private var isInForeground: Boolean = true
+  @PluginMethod
+  fun pinItemPlaybackWidget(call: PluginCall) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+      call.reject("Launcher pinning requires Android 8.0 or newer")
+      return
+    }
+    val manager = AppWidgetManager.getInstance(mainActivity)
+    val provider = ComponentName(mainActivity, ItemPlaybackWidget::class.java)
+    if (!manager.isRequestPinAppWidgetSupported) {
+      call.reject("This launcher does not support adding widgets from the app")
+      return
+    }
+    val mediaType = call.getString("mediaType")
+    val title = call.getString("title")
+    val serverItemId = call.getString("serverItemId")?.takeIf { it.isNotBlank() }
+    val localItemId = call.getString("localItemId")?.takeIf { it.isNotBlank() }
+    val serverConfigId = call.getString("serverConfigId")?.takeIf { it.isNotBlank() }
+    if (mediaType !in listOf("book", "podcast") || title.isNullOrBlank() ||
+      (serverItemId == null && localItemId == null) || (serverItemId != null && serverConfigId == null)) {
+      call.reject("Invalid widget target")
+      return
+    }
+    val target = WidgetTarget(title, mediaType!!, call.getString("podcastType") ?: "", serverItemId, serverConfigId, localItemId,
+      call.getString("episodeDates") ?: "{}", call.getBoolean("hasCover") == true)
+    val callbackIntent = Intent(mainActivity, ItemPlaybackWidget::class.java).apply {
+      action = ItemPlaybackWidget.ACTION_PINNED
+      putExtra(ItemPlaybackWidget.EXTRA_TARGET, target.toJson())
+    }
+    val callback = PendingIntent.getBroadcast(mainActivity, SystemClock.uptimeMillis().toInt(), callbackIntent,
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE)
+    val requested = manager.requestPinAppWidget(provider, null, callback)
+    if (requested) call.resolve(JSObject().put("requested", true))
+    else call.reject("The launcher did not accept the widget request")
+  }
 
   override fun load() {
     mainActivity = (activity as MainActivity)

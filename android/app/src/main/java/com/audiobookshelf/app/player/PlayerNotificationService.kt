@@ -2,6 +2,7 @@ package com.audiobookshelf.app.player
 
 import android.annotation.SuppressLint
 import android.app.*
+import android.appwidget.AppWidgetManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -28,6 +29,9 @@ import androidx.core.content.ContextCompat
 import androidx.media.MediaBrowserServiceCompat
 import androidx.media.utils.MediaConstants
 import com.audiobookshelf.app.BuildConfig
+import com.audiobookshelf.app.WidgetPlayback
+import com.audiobookshelf.app.WidgetTargetStore
+import com.audiobookshelf.app.ItemPlaybackWidget
 import com.audiobookshelf.app.R
 import com.audiobookshelf.app.data.*
 import com.audiobookshelf.app.data.DeviceInfo
@@ -68,6 +72,9 @@ const val PLAYER_EXO = "exo-player"
 class PlayerNotificationService : MediaBrowserServiceCompat() {
 
   companion object {
+    const val ACTION_PLAY_WIDGET_TARGET = "com.audiobookshelf.app.PLAY_WIDGET_TARGET"
+    var widgetInstance: PlayerNotificationService? = null
+      private set
     var isStarted = false
     var isClosed = false
     var isUnmeteredNetwork = false
@@ -117,6 +124,7 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
   private var notificationId = 10
   private var channelId = "audiobookshelf_channel"
   private var channelName = "Audiobookshelf Channel"
+  private val widgetPlayback by lazy { WidgetPlayback(this) }
 
   var currentPlaybackSession: PlaybackSession? = null
   private var initialPlaybackRate: Float? = null
@@ -168,7 +176,34 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
     isStarted = true
     Log.d(tag, "onStartCommand $startId")
 
+    if (intent?.action == ACTION_PLAY_WIDGET_TARGET) {
+      val widgetId = intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
+      val target = WidgetTargetStore.get(this, widgetId)
+      if (target != null) {
+        if (currentPlaybackSession == null) {
+          val notification = NotificationCompat.Builder(this, channelId)
+            .setSmallIcon(R.drawable.icon_monochrome)
+            .setContentTitle(target.title)
+            .setContentText("Starting playback")
+            .setOngoing(true)
+            .build()
+          startForeground(notificationId, notification)
+        }
+        ItemPlaybackWidget.showStarting(this, widgetId)
+        widgetPlayback.play(target, widgetId)
+      } else {
+        finishWidgetStartup()
+      }
+    }
+
     return START_STICKY
+  }
+
+  fun finishWidgetStartup() {
+    if (currentPlaybackSession == null) {
+      stopForeground(Service.STOP_FOREGROUND_REMOVE)
+      stopSelf()
+    }
   }
 
   @Deprecated("Deprecated in Java")
@@ -188,6 +223,7 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
 
   // detach player
   override fun onDestroy() {
+    widgetPlayback.cancel()
     try {
       val connectivityManager =
               getSystemService(ConnectivityManager::class.java) as ConnectivityManager
@@ -197,6 +233,8 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
     }
 
     Log.d(tag, "onDestroy")
+    ItemPlaybackWidget.clearPlayback(this)
+    widgetInstance = null
     isStarted = false
     isClosed = true
     DeviceManager.widgetUpdater?.onPlayerChanged(this)
@@ -222,6 +260,7 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
   override fun onCreate() {
     Log.d(tag, "onCreate")
     super.onCreate()
+    widgetInstance = this
     ctx = this
 
     // Initialize Paper
@@ -1063,6 +1102,7 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
     currentPlaybackSession = null
     mediaProgressSyncer.reset()
     clientEventEmitter?.onPlaybackClosed()
+    ItemPlaybackWidget.clearPlayback(this)
 
     PlayerListener.lastPauseTime = 0
     isClosed = true

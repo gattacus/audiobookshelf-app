@@ -8,7 +8,7 @@
 
 <script>
 import { Dialog } from '@capacitor/dialog'
-import { AbsFileSystem } from '@/plugins/capacitor'
+import { AbsAudioPlayer, AbsFileSystem } from '@/plugins/capacitor'
 
 export default {
   props: {
@@ -52,6 +52,10 @@ export default {
     },
     moreMenuItems() {
       const items = []
+
+      if (this.$platform === 'android' && !this.episode && (this.mediaType === 'book' || this.mediaType === 'podcast')) {
+        items.push({ text: 'Add playback widget', value: 'playbackWidget', icon: 'widgets' })
+      }
 
       // TODO: Implement on iOS
       if (this.$platform !== 'ios' && !this.isPodcast) {
@@ -267,7 +271,9 @@ export default {
   methods: {
     moreMenuAction(action) {
       this.show = false
-      if (action === 'manageLocal') {
+      if (action === 'playbackWidget') {
+        this.pinPlaybackWidget()
+      } else if (action === 'manageLocal') {
         this.$nextTick(() => {
           this.$router.push(`/localMedia/item/${this.localLibraryItemId}`)
         })
@@ -295,6 +301,24 @@ export default {
         this.showSendEbookDevicesModal = true
       } else if (action === 'openWebClient') {
         this.$store.dispatch('user/openWebClient', `/item/${this.serverLibraryItemId}`)
+      }
+    },
+    async pinPlaybackWidget() {
+      try {
+        const localEpisodeIds = new Set(this.localLibraryItem?.media?.episodes?.map((episode) => episode.serverEpisodeId || episode.id) || [])
+        const datedEpisodes = this.episodes.filter((episode) => !this.localLibraryItemId || localEpisodeIds.has(episode.id))
+        await AbsAudioPlayer.pinItemPlaybackWidget({
+          title: this.title,
+          mediaType: this.mediaType,
+          podcastType: this.mediaMetadata.type || '',
+          hasCover: !!(this.localLibraryItem?.coverContentUrl || this.media.coverPath),
+          episodeDates: JSON.stringify(Object.fromEntries(datedEpisodes.map((episode) => [episode.id, episode.publishedAt]))),
+          serverItemId: this.serverLibraryItemId,
+          serverConfigId: this.serverLibraryItemId ? (this.localLibraryItem?.serverConnectionConfigId || this.$store.getters['user/getServerConnectionConfigId']) : null,
+          localItemId: this.localLibraryItemId
+        })
+      } catch (error) {
+        this.$toast.error(error?.message || 'Could not add playback widget')
       }
     },
     async toggleFinished() {
