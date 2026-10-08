@@ -890,6 +890,11 @@ export default {
     },
     // When a playback session is started the native android/ios will send the session
     onPlaybackSession(playbackSession) {
+      if (this.$platform === 'android' && this.playbackSession?.id === playbackSession.id) {
+        this.playbackSession = playbackSession
+        this.$store.commit('setPlaybackSession', playbackSession)
+        return
+      }
       console.log('onPlaybackSession received', JSON.stringify(playbackSession))
       this.playbackSession = playbackSession
 
@@ -924,14 +929,29 @@ export default {
     async init() {
       await this.loadPlayerSettings()
 
-      AbsAudioPlayer.addListener('onPlaybackSession', this.onPlaybackSession)
-      AbsAudioPlayer.addListener('onPlaybackClosed', this.onPlaybackClosed)
-      AbsAudioPlayer.addListener('onPlaybackFailed', this.onPlaybackFailed)
-      AbsAudioPlayer.addListener('onPlayingUpdate', this.onPlayingUpdate)
-      AbsAudioPlayer.addListener('onMetadata', this.onMetadata)
-      AbsAudioPlayer.addListener('onProgressSyncFailing', this.showProgressSyncIsFailing)
-      AbsAudioPlayer.addListener('onProgressSyncSuccess', this.showProgressSyncSuccess)
-      AbsAudioPlayer.addListener('onPlaybackSpeedChanged', this.onPlaybackSpeedChanged)
+      await Promise.all([
+        AbsAudioPlayer.addListener('onPlaybackSession', this.onPlaybackSession),
+        AbsAudioPlayer.addListener('onPlaybackClosed', this.onPlaybackClosed),
+        AbsAudioPlayer.addListener('onPlaybackFailed', this.onPlaybackFailed),
+        AbsAudioPlayer.addListener('onPlayingUpdate', this.onPlayingUpdate),
+        AbsAudioPlayer.addListener('onMetadata', this.onMetadata),
+        AbsAudioPlayer.addListener('onProgressSyncFailing', this.showProgressSyncIsFailing),
+        AbsAudioPlayer.addListener('onProgressSyncSuccess', this.showProgressSyncSuccess),
+        AbsAudioPlayer.addListener('onPlaybackSpeedChanged', this.onPlaybackSpeedChanged)
+      ])
+
+      if (this.$platform === 'android') {
+        try {
+          const state = await AbsAudioPlayer.getPlaybackState()
+          if (state.session) {
+            this.onPlaybackSession(state.session)
+            this.onPlayingUpdate({ value: state.isPlaying })
+            this.onMetadata({ duration: state.duration, currentTime: state.currentTime, playerState: state.playerState })
+          }
+        } catch (error) {
+          console.error('Could not restore Android playback state', error)
+        }
+      }
     },
     async screenOrientationChange() {
       if (this.isRefreshingUI) return

@@ -23,6 +23,7 @@ import com.fasterxml.jackson.core.json.JsonReadFeature
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.getcapacitor.*
 import com.getcapacitor.annotation.CapacitorPlugin
+import com.google.android.exoplayer2.Player
 import com.google.android.gms.cast.CastDevice
 import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
@@ -43,6 +44,38 @@ class AbsAudioPlayer : Plugin() {
 
   // Track foreground state to avoid flooding WebView with events while backgrounded
   private var isInForeground: Boolean = true
+  private val pendingPlaybackStateCalls = mutableListOf<PluginCall>()
+
+  @PluginMethod
+  fun getPlaybackState(call: PluginCall) {
+    Handler(Looper.getMainLooper()).post {
+      if (::playerNotificationService.isInitialized) {
+        resolvePlaybackState(call)
+      } else {
+        pendingPlaybackStateCalls.add(call)
+      }
+    }
+  }
+
+  private fun resolvePlaybackState(call: PluginCall) {
+    val service = playerNotificationService
+    val session = service.currentPlaybackSession
+    val result = JSObject()
+    if (session != null) {
+      result.put("session", JSObject(jacksonMapper.writeValueAsString(session)))
+      result.put("isPlaying", service.currentPlayer.isPlaying)
+      result.put("currentTime", service.getCurrentTimeSeconds())
+      result.put("duration", session.getTotalDuration())
+      result.put("playerState", when (service.currentPlayer.playbackState) {
+        Player.STATE_BUFFERING -> PlayerState.BUFFERING.name
+        Player.STATE_ENDED -> PlayerState.ENDED.name
+        Player.STATE_IDLE -> PlayerState.IDLE.name
+        else -> PlayerState.READY.name
+      })
+    }
+    call.resolve(result)
+  }
+
   @PluginMethod
   fun pinItemPlaybackWidget(call: PluginCall) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
@@ -159,6 +192,7 @@ class AbsAudioPlayer : Plugin() {
       })
 
       MediaEventManager.clientEventEmitter = playerNotificationService.clientEventEmitter
+      pendingPlaybackStateCalls.toList().also { pendingPlaybackStateCalls.clear() }.forEach(::resolvePlaybackState)
     }
     mainActivity.pluginCallback = foregroundServiceReady
   }
@@ -186,10 +220,14 @@ class AbsAudioPlayer : Plugin() {
     // Send current state to UI after resume to sync up (with small delay to let WebView fully resume)
     if (::playerNotificationService.isInitialized && playerNotificationService.currentPlaybackSession != null) {
       Handler(Looper.getMainLooper()).postDelayed({
-        playerNotificationService.sendClientMetadata(PlayerState.READY)
-        playerNotificationService.sleepTimerManager.sendCurrentSleepTimerState()
-        playerNotificationService.mediaProgressSyncer.currentLocalMediaProgress?.let {
-          playerNotificationService.clientEventEmitter?.onLocalMediaProgressUpdate(it)
+        playerNotificationService.currentPlaybackSession?.let { session ->
+          playerNotificationService.clientEventEmitter?.onPlaybackSession(session)
+          playerNotificationService.clientEventEmitter?.onPlayingUpdate(playerNotificationService.currentPlayer.isPlaying)
+          playerNotificationService.sendClientMetadata(PlayerState.READY)
+          playerNotificationService.sleepTimerManager.sendCurrentSleepTimerState()
+          playerNotificationService.mediaProgressSyncer.currentLocalMediaProgress?.let {
+            playerNotificationService.clientEventEmitter?.onLocalMediaProgressUpdate(it)
+          }
         }
       }, 100)
     }
