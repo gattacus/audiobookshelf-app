@@ -20,6 +20,7 @@ Selects the only authorized physical device automatically. With multiple phones,
 pass a serial from `adb devices -l`. USB and wireless ADB are supported.
 Updates com.audiobookshelf.app.debug with `adb install -r`, retaining its data.
 The Play Store app stays separate; its private data is not copied to the fork.
+Node.js 20 is selected automatically when available; NODE20_HOME can specify it.
 EOF
 }
 fail() { echo "Error: $*" >&2; exit 1; }
@@ -34,6 +35,37 @@ for arg in "$@"; do
        device_serial=$arg ;;
   esac
 done
+
+if [[ $build_mode == full ]]; then
+  is_node20() {
+    [[ -x $1 ]] && [[ $("$1" -p 'process.versions.node.split(".")[0]' 2>/dev/null) == 20 ]]
+  }
+  node20_bin=
+  if [[ -n ${NODE20_HOME:-} ]]; then
+    is_node20 "$NODE20_HOME/bin/node" || fail 'NODE20_HOME must point to a Node.js 20 installation containing bin/node.'
+    node20_bin="$NODE20_HOME/bin"
+  elif command -v node >/dev/null 2>&1 && is_node20 "$(command -v node)"; then
+    node20_bin=$(dirname "$(command -v node)")
+  else
+    for candidate in \
+      /opt/homebrew/opt/node@20/bin /usr/local/opt/node@20/bin \
+      "${NVM_DIR:-$HOME/.nvm}"/versions/node/v20*/bin \
+      "${FNM_DIR:-$HOME/.local/share/fnm}"/node-versions/v20*/installation/bin \
+      "$HOME"/.volta/tools/image/node/20*/bin \
+      "$HOME"/.local/share/mise/installs/node/20*/bin \
+      "$HOME"/.npm/_npx/*/node_modules/node/bin; do
+      if is_node20 "$candidate/node"; then
+        node20_bin=$candidate
+        break
+      fi
+    done
+  fi
+  [[ -n $node20_bin ]] || fail 'Node.js 20 not found. Install it or set NODE20_HOME to its installation directory.'
+  export PATH="$node20_bin:$PATH"
+  hash -r
+  command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1 || fail 'npm and npx are required for the web build.'
+  echo "Using Node.js $(node --version) from $(command -v node)"
+fi
 
 # Local SDK configuration also works when platform-tools is absent from PATH.
 sdk_root=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}
@@ -99,8 +131,6 @@ fi
 [[ -n $aapt_bin ]] || fail 'aapt not found. Install Android SDK build-tools and set ANDROID_HOME.'
 cd "$repo_root"
 if [[ $build_mode == full ]]; then
-  command -v node >/dev/null 2>&1 || fail 'Node.js 20 is required.'
-  [[ $(node -p 'process.versions.node.split(".")[0]') == 20 ]] || fail 'Use Node.js 20 for the web build.'
   if [[ ! -d node_modules ]]; then
     npm ci --omit=optional
   fi

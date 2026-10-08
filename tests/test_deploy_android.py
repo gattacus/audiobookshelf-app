@@ -43,7 +43,9 @@ if tool == 'adb':
 elif tool == 'aapt':
     print("package: name='" + os.environ.get('MOCK_PACKAGE', 'com.audiobookshelf.app.debug') + "' versionCode='120'")
 elif tool == 'node':
-    print('20')
+    current_runtime = pathlib.Path(sys.argv[0]).parent == pathlib.Path(os.environ['HOME']) / 'bin'
+    major = os.environ.get('MOCK_NODE_MAJOR', '20') if current_runtime else '20'
+    print(major)
 elif tool in ('npm', 'npx', 'git', 'gradlew'):
     pass
 else:
@@ -75,6 +77,16 @@ class DeployAndroidTest(unittest.TestCase):
         self.log = self.root / 'commands.log'
         self.env = dict(os.environ, PATH=f'{tools}:{os.environ["PATH"]}',
                         HOME=str(self.root), MOCK_LOG=str(self.log))
+        for name in ('NODE20_HOME', 'NVM_DIR', 'FNM_DIR'):
+            self.env.pop(name, None)
+
+    def install_node20(self, relative_path):
+        directory = self.root / relative_path
+        directory.mkdir(parents=True)
+        node = directory / 'node'
+        node.write_text(MOCK_TOOL)
+        node.chmod(0o755)
+        return directory
 
     def run_script(self, *args, **env):
         result = subprocess.run(['bash', str(self.root / 'scripts/deploy_android.sh'), *args],
@@ -135,6 +147,33 @@ class DeployAndroidTest(unittest.TestCase):
         self.assertIn('First fork installation', result.stdout)
         result = self.run_script('--skip-build', MOCK_FAIL_LAUNCH='1')
         self.assertNotEqual(result.returncode, 0)
+
+    def test_explicit_node20_installation_overrides_current_runtime(self):
+        directory = self.install_node20('node20/bin')
+        result = self.run_script(NODE20_HOME=str(directory.parent), MOCK_NODE_MAJOR='26')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(str(directory / 'node'), result.stdout)
+        self.assertIn('npm run generate', self.commands)
+
+    def test_invalid_explicit_runtime_stops_before_build_or_install(self):
+        result = self.run_script(NODE20_HOME=str(self.root), MOCK_NODE_MAJOR='26')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('NODE20_HOME must point to a Node.js 20 installation', result.stderr)
+        self.assertNotIn('npm run generate', self.commands)
+        self.assertNotIn('gradlew', self.commands)
+        self.assertNotIn(' install ', self.commands)
+
+    def test_cached_node20_is_discovered_when_current_runtime_is_wrong(self):
+        directory = self.install_node20('.npm/_npx/cache/node_modules/node/bin')
+        result = self.run_script(MOCK_NODE_MAJOR='26')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(str(directory / 'node'), result.stdout)
+
+    def test_native_only_does_not_require_node20(self):
+        result = self.run_script('--native-only', MOCK_NODE_MAJOR='26', NODE20_HOME='/missing')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('npm run generate', self.commands)
+        self.assertIn('gradlew assembleDebug', self.commands)
 
 
 if __name__ == '__main__':
