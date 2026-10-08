@@ -2,6 +2,9 @@ package com.audiobookshelf.app.media
 
 import android.app.Activity
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.support.v4.media.MediaBrowserCompat
 import android.util.Log
 import com.audiobookshelf.app.data.*
@@ -18,7 +21,6 @@ import org.json.JSONException
 import org.json.JSONObject
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
-import java.util.concurrent.atomic.AtomicInteger
 
 class MediaManager(private var apiHandler: ApiHandler, var ctx: Context) {
   val tag = "MediaManager"
@@ -44,7 +46,12 @@ class MediaManager(private var apiHandler: ApiHandler, var ctx: Context) {
   private var serverConfigIdUsed:String? = null
   private var serverConfigLastPing:Long = 0L
   var serverUserMediaProgress:MutableList<MediaProgress> = mutableListOf()
-  var serverItemsInProgress = listOf<ItemInProgress>()
+  private val androidAutoLibraryCaches = mutableMapOf<String, AndroidAutoBrowseCache<List<ItemInProgress>>>()
+  private val browseHandler = Handler(Looper.getMainLooper())
+  val serverItemsInProgress: List<ItemInProgress>
+    get() = AndroidAutoContinueItems.merge(serverLibraries.map {
+      androidAutoLibraryCaches[it.id]?.value.orEmpty()
+    })
   var serverLibraries = listOf<Library>()
 
   var userSettingsPlaybackRate:Float? = null
@@ -163,7 +170,7 @@ class MediaManager(private var apiHandler: ApiHandler, var ctx: Context) {
       cachedLibraryDiscovery = hashMapOf()
       cachedLibraryPodcasts = hashMapOf()
       isLibraryPodcastsCached = hashMapOf()
-      serverItemsInProgress = listOf()
+      androidAutoLibraryCaches.clear()
       allLibraryPersonalizationsDone = false
       libraryPersonalizationsDone = 0
       return true
@@ -171,126 +178,143 @@ class MediaManager(private var apiHandler: ApiHandler, var ctx: Context) {
     return false
   }
 
-  private fun loadItemsInProgressForAllLibraries(cb: (List<ItemInProgress>) -> Unit) {
-    if (serverItemsInProgress.isNotEmpty()) {
-      cb(serverItemsInProgress)
-    } else {
-      apiHandler.getAllItemsInProgress { itemsInProgress ->
-        serverItemsInProgress = itemsInProgress.filter {
-          val libraryItem = it.libraryItemWrapper as LibraryItem
-          libraryItem.checkHasTracks()
-        }
-        cb(serverItemsInProgress)
-      }
-    }
-  }
-
   /**
    * Load personalized shelves from server for all libraries.
    * [cb] resolves when all libraries are processed
    */
-  fun populatePersonalizedDataForAllLibraries(cb: () -> Unit) {
-    val remaining = AtomicInteger(serverLibraries.size)
-
-    serverLibraries.forEach { lib ->
-      Log.d(tag, "Loading personalization for library ${lib.name}")
-      populatePersonalizedDataForLibrary(lib.id) {
-        Log.d(tag, "Loaded personalization for library ${lib.name}")
-        if (remaining.decrementAndGet() == 0) {
-          Log.d(tag, "Finished loading all library personalization data")
-          allLibraryPersonalizationsDone = true
-          cb()
+  fun populatePersonalizedDataForAllLibraries(cb: (Boolean) -> Unit) {
+    val libraries = serverLibraries.toList()
+    if (libraries.isEmpty()) return cb(false)
+    var remaining = libraries.size
+    var changed = false
+    libraries.forEach { lib ->
+      populatePersonalizedDataForLibrary(lib.id) { loaded ->
+        changed = changed || loaded
+        if (--remaining == 0) {
+          allLibraryPersonalizationsDone = serverLibraries.all {
+            androidAutoLibraryCaches[it.id]?.hasValue == true
+          }
+          cb(changed)
         }
       }
     }
+  }
+
+  fun nextAndroidAutoBrowseRefreshDelayMs(): Long? = serverLibraries.minOfOrNull {
+    androidAutoLibraryCaches[it.id]?.nextLoadDelayMs(SystemClock.elapsedRealtime()) ?: 0L
   }
 
   /**
    * Get personalized shelves from server for selected [libraryId].
    * Populates [cachedLibraryRecentShelves] and [cachedLibraryDiscovery].
    */
-  private fun populatePersonalizedDataForLibrary(libraryId: String, cb: () -> Unit) {
+  private fun populatePersonalizedDataForLibrary(libraryId: String, cb: (Boolean) -> Unit) {
+    val cache = androidAutoLibraryCaches.getOrPut(libraryId) { AndroidAutoBrowseCache(emptyList()) }
+    val requestId = cache.beginLoad(SystemClock.elapsedRealtime()) ?: return cb(false)
     apiHandler.getLibraryPersonalized(libraryId) { shelves ->
-      Log.d(tag, "populatePersonalizedDataForLibrary $libraryId")
-      if (shelves === null) return@getLibraryPersonalized
-      shelves.map { shelf ->
-        Log.d(tag, "$shelf")
-        if (shelf.type == "book") {
-          if (shelf.id == "continue-listening") return@map
-          else if (shelf.id == "listen-again") return@map
-          else if (shelf.id == "recently-added") {
-            if (!cachedLibraryRecentShelves.containsKey(libraryId)) {
-              cachedLibraryRecentShelves[libraryId] = mutableListOf()
-            }
-            if (cachedLibraryRecentShelves[libraryId]?.find { it.id == shelf.id } == null) {
-              cachedLibraryRecentShelves[libraryId]!!.add(shelf)
-            }
+      browseHandler.post {
+        // Ignore a response from a previous server/account after the browse cache was reset.
+        if (androidAutoLibraryCaches[libraryId] !== cache) {
+          cb(false)
+          return@post
+        }
+        Log.d(tag, "populatePersonalizedDataForLibrary $libraryId")
+        val continueItems = shelves?.let { AndroidAutoContinueItems.fromShelves(it, serverUserMediaProgress) }
+        cache.complete(requestId, continueItems, SystemClock.elapsedRealtime())
+        if (shelves == null) {
+          Log.w(tag, "Android Auto shelves unavailable; retaining previous items and retrying")
+          cb(false)
+          return@post
+        }
+        continueItems.orEmpty().forEach { item ->
+          val libraryItem = item.libraryItemWrapper as LibraryItem
+          if (serverLibraryItems.none { it.id == libraryItem.id }) serverLibraryItems.add(libraryItem)
+          item.episode?.let { podcastEpisode ->
+            podcastEpisodeLibraryItemMap[podcastEpisode.id] = LibraryItemWithEpisode(libraryItem, podcastEpisode)
           }
-          else if (shelf.id == "discover") {
-            if (!cachedLibraryDiscovery.containsKey(libraryId)) {
-              cachedLibraryDiscovery[libraryId] = mutableListOf()
+        }
+        // A successful refresh replaces the snapshot, including genuinely empty shelves.
+        cachedLibraryRecentShelves.remove(libraryId)
+        cachedLibraryDiscovery.remove(libraryId)
+        shelves.map { shelf ->
+          Log.d(tag, "$shelf")
+          if (shelf.type == "book") {
+            if (shelf.id == "continue-listening") return@map
+            else if (shelf.id == "listen-again") return@map
+            else if (shelf.id == "recently-added") {
+              if (!cachedLibraryRecentShelves.containsKey(libraryId)) {
+                cachedLibraryRecentShelves[libraryId] = mutableListOf()
+              }
+              if (cachedLibraryRecentShelves[libraryId]?.find { it.id == shelf.id } == null) {
+                cachedLibraryRecentShelves[libraryId]!!.add(shelf)
+              }
             }
-            (shelf as LibraryShelfBookEntity).entities?.map {
-              cachedLibraryDiscovery[libraryId]!!.add(it)
+            else if (shelf.id == "discover") {
+              if (!cachedLibraryDiscovery.containsKey(libraryId)) {
+                cachedLibraryDiscovery[libraryId] = mutableListOf()
+              }
+              (shelf as LibraryShelfBookEntity).entities?.map {
+                cachedLibraryDiscovery[libraryId]!!.add(it)
+              }
             }
-          }
-          else if (shelf.id == "continue-reading") return@map
-          else if (shelf.id == "continue-series") return@map
-          shelf as LibraryShelfBookEntity
-        } else if (shelf.type == "series") {
-          if (shelf.id == "recent-series") {
-            if (!cachedLibraryRecentShelves.containsKey(libraryId)) {
-              cachedLibraryRecentShelves[libraryId] = mutableListOf()
+            else if (shelf.id == "continue-reading") return@map
+            else if (shelf.id == "continue-series") return@map
+            shelf as LibraryShelfBookEntity
+          } else if (shelf.type == "series") {
+            if (shelf.id == "recent-series") {
+              if (!cachedLibraryRecentShelves.containsKey(libraryId)) {
+                cachedLibraryRecentShelves[libraryId] = mutableListOf()
+              }
+              if (cachedLibraryRecentShelves[libraryId]?.find { it.id == shelf.id } == null) {
+                cachedLibraryRecentShelves[libraryId]!!.add(shelf)
+              }
             }
-            if (cachedLibraryRecentShelves[libraryId]?.find { it.id == shelf.id } == null) {
-              cachedLibraryRecentShelves[libraryId]!!.add(shelf)
-            }
-          }
-        } else if (shelf.type == "episode") {
-          if (shelf.id == "continue-listening") return@map
-          else if (shelf.id == "listen-again") return@map
-          else if (shelf.id == "newest-episodes") {
-            if (!cachedLibraryRecentShelves.containsKey(libraryId)) {
-              cachedLibraryRecentShelves[libraryId] = mutableListOf()
-            }
-            if (cachedLibraryRecentShelves[libraryId]?.find { it.id == shelf.id } == null) {
-              cachedLibraryRecentShelves[libraryId]!!.add(shelf)
-            }
+          } else if (shelf.type == "episode") {
+            if (shelf.id == "continue-listening") return@map
+            else if (shelf.id == "listen-again") return@map
+            else if (shelf.id == "newest-episodes") {
+              if (!cachedLibraryRecentShelves.containsKey(libraryId)) {
+                cachedLibraryRecentShelves[libraryId] = mutableListOf()
+              }
+              if (cachedLibraryRecentShelves[libraryId]?.find { it.id == shelf.id } == null) {
+                cachedLibraryRecentShelves[libraryId]!!.add(shelf)
+              }
 
-            val podcastLibraryItemIds = mutableListOf<String>()
-            (shelf as LibraryShelfEpisodeEntity).entities?.forEach { libraryItem ->
-              if (!podcastLibraryItemIds.contains(libraryItem.id)) {
-                podcastLibraryItemIds.add(libraryItem.id)
-                loadPodcastItem(libraryItem.libraryId, libraryItem.id) {}
+              val podcastLibraryItemIds = mutableListOf<String>()
+              (shelf as LibraryShelfEpisodeEntity).entities?.forEach { libraryItem ->
+                if (!podcastLibraryItemIds.contains(libraryItem.id)) {
+                  podcastLibraryItemIds.add(libraryItem.id)
+                  loadPodcastItem(libraryItem.libraryId, libraryItem.id) {}
+                }
+              }
+            }
+          } else if (shelf.type == "podcast") {
+            if (shelf.id == "recently-added"){
+              if (!cachedLibraryRecentShelves.containsKey(libraryId)) {
+                cachedLibraryRecentShelves[libraryId] = mutableListOf()
+              }
+              if (cachedLibraryRecentShelves[libraryId]?.find { it.id == shelf.id } == null) {
+                cachedLibraryRecentShelves[libraryId]!!.add(shelf)
+              }
+            }
+            else if (shelf.id == "discover"){
+              return@map
+            }
+          } else if (shelf.type =="authors") {
+            if (shelf.id == "newest-authors") {
+              if (!cachedLibraryRecentShelves.containsKey(libraryId)) {
+                cachedLibraryRecentShelves[libraryId] = mutableListOf()
+              }
+              if (cachedLibraryRecentShelves[libraryId]?.find { it.id == shelf.id } == null) {
+                cachedLibraryRecentShelves[libraryId]!!.add(shelf)
               }
             }
           }
-        } else if (shelf.type == "podcast") {
-          if (shelf.id == "recently-added"){
-            if (!cachedLibraryRecentShelves.containsKey(libraryId)) {
-              cachedLibraryRecentShelves[libraryId] = mutableListOf()
-            }
-            if (cachedLibraryRecentShelves[libraryId]?.find { it.id == shelf.id } == null) {
-              cachedLibraryRecentShelves[libraryId]!!.add(shelf)
-            }
-          }
-          else if (shelf.id == "discover"){
-            return@map
-          }
-        } else if (shelf.type =="authors") {
-          if (shelf.id == "newest-authors") {
-            if (!cachedLibraryRecentShelves.containsKey(libraryId)) {
-              cachedLibraryRecentShelves[libraryId] = mutableListOf()
-            }
-            if (cachedLibraryRecentShelves[libraryId]?.find { it.id == shelf.id } == null) {
-              cachedLibraryRecentShelves[libraryId]!!.add(shelf)
-            }
-          }
-        }
 
+        }
+        Log.d(tag, "populatePersonalizedDataForLibrary $libraryId DONE")
+        cb(true)
       }
-      Log.d(tag, "populatePersonalizedDataForLibrary $libraryId DONE")
-      cb()
     }
   }
 
@@ -826,25 +850,6 @@ class MediaManager(private var apiHandler: ApiHandler, var ctx: Context) {
         }
         cb()
       }
-    }
-  }
-
-  fun initializeInProgressItems(cb: () -> Unit) {
-    Log.d(tag, "Initializing inprogress items")
-
-    loadItemsInProgressForAllLibraries { itemsInProgress ->
-      itemsInProgress.forEach {
-        val libraryItem = it.libraryItemWrapper as LibraryItem
-        if (serverLibraryItems.find { li -> li.id == libraryItem.id } == null) {
-          serverLibraryItems.add(libraryItem)
-        }
-
-        if (it.episode != null) {
-          podcastEpisodeLibraryItemMap[it.episode.id] = LibraryItemWithEpisode(it.libraryItemWrapper, it.episode)
-        }
-      }
-      Log.d(tag, "Initializing inprogress items done")
-      cb()
     }
   }
 

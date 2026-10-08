@@ -9,6 +9,7 @@ import android.util.Log
 import com.audiobookshelf.app.data.*
 import com.audiobookshelf.app.device.DeviceManager
 import com.audiobookshelf.app.media.MediaEventManager
+import com.audiobookshelf.app.media.AndroidAutoShelfResponse
 import com.audiobookshelf.app.media.MediaProgressSyncData
 import com.audiobookshelf.app.media.SyncResult
 import com.audiobookshelf.app.models.User
@@ -423,18 +424,9 @@ class ApiHandler(var ctx:Context) {
 
   fun getLibraryPersonalized(libraryItemId:String, cb: (List<LibraryShelfType>?) -> Unit) {
     getRequest("/api/libraries/$libraryItemId/personalized", null, null) {
-      if (it.has("error")) {
-        Log.e(tag, it.getString("error") ?: "getLibraryStats Failed")
-        cb(null)
-      } else {
-        val items = mutableListOf<LibraryShelfType>()
-        val array = it.getJSONArray("value")
-        for (i in 0 until array.length()) {
-          val item = jacksonMapper.readValue<LibraryShelfType>(array.get(i).toString())
-          items.add(item)
-        }
-        cb(items)
-      }
+      val shelves = AndroidAutoShelfResponse.parse(it.toString(), jacksonMapper)
+      if (shelves == null) Log.w(tag, "Personalized library shelves request failed or returned an invalid response")
+      cb(shelves)
     }
   }
 

@@ -224,6 +224,8 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
   // detach player
   override fun onDestroy() {
     widgetPlayback.cancel()
+    androidAutoBrowseDestroyed = true
+    androidAutoBrowseHandler.removeCallbacksAndMessages(null)
     try {
       val connectivityManager =
               getSystemService(ConnectivityManager::class.java) as ConnectivityManager
@@ -1184,6 +1186,30 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
   private val CONTINUE_ROOT = "__CONTINUE__"
   private lateinit var browseTree: BrowseTree
   private val browseTreeInitListeners = mutableListOf<() -> Unit>()
+  private val androidAutoBrowseHandler = Handler(Looper.getMainLooper())
+  private var androidAutoBrowseDestroyed = false
+  private var androidAutoBrowseLoading = false
+  private val androidAutoBrowseRefresh = Runnable { refreshAndroidAutoBrowseData() }
+
+  private fun refreshAndroidAutoBrowseData() {
+    if (androidAutoBrowseDestroyed || androidAutoBrowseLoading) return
+    androidAutoBrowseHandler.removeCallbacks(androidAutoBrowseRefresh)
+    androidAutoBrowseLoading = true
+    mediaManager.populatePersonalizedDataForAllLibraries { changed ->
+      androidAutoBrowseLoading = false
+      if (!androidAutoBrowseDestroyed) {
+        if (changed) {
+          AbsLogger.info(tag, "Android Auto shelves refreshed: ${mediaManager.serverItemsInProgress.size} Continue items")
+          notifyChildrenChanged(AUTO_MEDIA_ROOT)
+          notifyChildrenChanged(CONTINUE_ROOT)
+          notifyChildrenChanged(RECENTLY_ROOT)
+        }
+        mediaManager.nextAndroidAutoBrowseRefreshDelayMs()?.let { delay ->
+          androidAutoBrowseHandler.postDelayed(androidAutoBrowseRefresh, delay.coerceAtLeast(1_000L))
+        }
+      }
+    }
+  }
 
   private fun waitForBrowseTree(cb: () -> Unit)
   {
@@ -1385,19 +1411,7 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
 
           result.sendResult(children as MutableList<MediaBrowserCompat.MediaItem>?)
           firstLoadDone = true
-          if (mediaManager.serverLibraries.isNotEmpty()) {
-            AbsLogger.info(tag, "onLoadChildren: Android Auto fetching personalized data for all libraries")
-            mediaManager.populatePersonalizedDataForAllLibraries {
-              AbsLogger.info(tag, "onLoadChildren: Android Auto loaded personalized data for all libraries")
-              notifyChildrenChanged("/")
-            }
-
-            AbsLogger.info(tag, "onLoadChildren: Android Auto fetching in progress items")
-            mediaManager.initializeInProgressItems {
-              AbsLogger.info(tag, "onLoadChildren: Android Auto loaded in progress items")
-              notifyChildrenChanged("/")
-            }
-          }
+          androidAutoBrowseHandler.post { refreshAndroidAutoBrowseData() }
         }
       } else {
         Log.d(tag, "Starting browseTree refresh")
@@ -1420,6 +1434,7 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
 
         AbsLogger.info(tag, "onLoadChildren: Android auto data loaded")
         result.sendResult(children as MutableList<MediaBrowserCompat.MediaItem>?)
+        refreshAndroidAutoBrowseData()
       }
     } else if (parentMediaId == LIBRARIES_ROOT || parentMediaId == RECENTLY_ROOT)
     {
