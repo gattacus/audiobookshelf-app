@@ -334,6 +334,10 @@ export default {
   mounted() {
     if (this.$route.query['episodefilter'] === 'downloaded') {
       this.$store.dispatch('user/updateUserSettings', { podcastEpisodesFilterBy: 'downloaded' })
+      // Consume the Downloads entry hint so returning from an episode keeps the user's choice.
+      const query = { ...this.$route.query }
+      delete query.episodefilter
+      this.$router.replace({ path: this.$route.path, query, hash: this.$route.hash })
     }
     this.$socket.$on('episode_download_queued', this.episodeDownloadQueued)
     this.$socket.$on('episode_download_started', this.episodeDownloadStarted)
