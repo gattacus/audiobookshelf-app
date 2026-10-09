@@ -38,8 +38,13 @@
       </div>
     </div>
 
-    <template v-for="episode in episodesSorted">
-      <tables-podcast-episode-row :episode="episode" :local-episode="localEpisodeMap[episode.id]" :library-item-id="libraryItemId" :local-library-item-id="localLibraryItemId" :is-local="isLocal" :sort-key="sortKey" :key="episode.id" @addToPlaylist="addEpisodeToPlaylist" />
+    <tables-podcast-virtual-episodes v-if="$platform === 'android' && episodesSorted.length > 100" :episodes="episodesSorted" :reset-key="`${filterKey}:${sortKey}:${sortDesc}`">
+      <template #default="{ episode }">
+        <tables-podcast-episode-row :episode="episode" :library-item="libraryItem" :local-episode="localEpisodeMap[episode.id]" :library-item-id="libraryItemId" :local-library-item-id="localLibraryItemId" :is-local="isLocal" :sort-key="sortKey" :key="episode.id" @addToPlaylist="addEpisodeToPlaylist" />
+      </template>
+    </tables-podcast-virtual-episodes>
+    <template v-else v-for="episode in episodesSorted">
+      <tables-podcast-episode-row :episode="episode" :library-item="libraryItem" :local-episode="localEpisodeMap[episode.id]" :library-item-id="libraryItemId" :local-library-item-id="localLibraryItemId" :is-local="isLocal" :sort-key="sortKey" :key="episode.id" @addToPlaylist="addEpisodeToPlaylist" />
     </template>
 
     <!-- Huhhh?
@@ -113,6 +118,16 @@ export default {
     episodesAreFiltered() {
       return this.episodesFiltered.length !== this.episodesCopy.length
     },
+    episodeProgressMap() {
+      const progress = this.isLocal ? this.$store.state.globals.localMediaProgress : this.$store.state.user.user?.mediaProgress
+      const map = new Map()
+      for (const entry of progress || []) {
+        const itemId = this.isLocal ? entry.localLibraryItemId : entry.libraryItemId
+        const episodeId = this.isLocal ? entry.localEpisodeId : entry.episodeId
+        if (itemId == this.libraryItemId && !map.has(episodeId)) map.set(episodeId, entry)
+      }
+      return map
+    },
     episodeSortItems() {
       return [
         {
@@ -166,6 +181,7 @@ export default {
         if (this.filterKey === 'downloaded') {
           return !!this.localEpisodeMap[ep.id]
         }
+        if (this.filterKey === 'all') return true
         var mediaProgress = this.getEpisodeProgress(ep)
         if (this.filterKey === 'incomplete') {
           return !mediaProgress?.isFinished
@@ -173,14 +189,12 @@ export default {
           return mediaProgress?.isFinished
         } else if (this.filterKey === 'inProgress') {
           return mediaProgress && !mediaProgress.isFinished
-        } else if (this.filterKey === 'all') {
-          console.log('Filter key is all')
-          return true
         }
         return true
       })
     },
     episodesSorted() {
+      const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
       return this.episodesFiltered.sort((a, b) => {
         let aValue
         let bValue
@@ -201,9 +215,9 @@ export default {
         }
 
         if (this.sortDesc) {
-          return String(bValue).localeCompare(String(aValue), undefined, { numeric: true, sensitivity: 'base' })
+          return collator.compare(String(bValue), String(aValue))
         }
-        return String(aValue).localeCompare(String(bValue), undefined, { numeric: true, sensitivity: 'base' })
+        return collator.compare(String(aValue), String(bValue))
       })
     },
     // Map of local episodes where server episode id is key
@@ -305,6 +319,7 @@ export default {
       this.showSortModal = true
     },
     getEpisodeProgress(episode) {
+      if (this.$platform === 'android') return this.episodeProgressMap.get(episode.id)
       if (this.isLocal) return this.$store.getters['globals/getLocalMediaProgressById'](this.libraryItemId, episode.id)
       return this.$store.getters['user/getUserMediaProgress'](this.libraryItemId, episode.id)
     },

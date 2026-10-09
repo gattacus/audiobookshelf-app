@@ -1,6 +1,6 @@
 <template>
   <div v-if="!libraryItem" class="w-full h-full relative flex items-center justify-center bg-bg">
-    <ui-loading-indicator />
+    <ui-loading-indicator :text="$strings.MessageLoading" />
   </div>
   <div v-else id="item-page" class="w-full h-full overflow-y-auto overflow-x-hidden relative bg-bg">
     <!-- cover -->

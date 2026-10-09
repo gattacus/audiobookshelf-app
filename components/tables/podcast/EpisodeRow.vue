@@ -62,8 +62,9 @@
       </div>
     </div>
 
-    <div v-if="processing" class="absolute top-0 left-0 w-full h-full bg-black bg-opacity-30 flex items-center justify-center">
+    <div v-if="processing || openingEpisode" class="absolute top-0 left-0 w-full h-full bg-black bg-opacity-60 flex items-center justify-center" role="status" aria-live="polite">
       <widgets-loading-spinner size="la-lg" />
+      <span v-if="openingEpisode" class="ml-3 text-sm text-fg">{{ $strings.MessageLoading }}</span>
     </div>
 
     <div v-if="!userIsFinished" class="absolute bottom-0 left-0 h-0.5 bg-warning" :style="{ width: itemProgressPercent * 100 + '%' }" />
@@ -73,10 +74,13 @@
 <script>
 import { AbsFileSystem, AbsDownloader } from '@/plugins/capacitor'
 import cellularPermissionHelpers from '@/mixins/cellularPermissionHelpers'
+import { waitForEpisodePaint } from '@/utils/episodeList'
+import { rememberEpisodePage, clearEpisodePage } from '@/utils/episodeNavigation'
 
 export default {
   props: {
     libraryItemId: String,
+    libraryItem: Object,
     episode: {
       type: Object,
       default: () => {}
@@ -94,6 +98,7 @@ export default {
     return {
       isProcessingReadUpdate: false,
       processing: false,
+      openingEpisode: false,
       startingDownload: false
     }
   },
@@ -181,8 +186,20 @@ export default {
     }
   },
   methods: {
-    goToEpisodePage() {
-      this.$router.push(`/item/${this.libraryItemId}/${this.episode.id}`)
+    async goToEpisodePage() {
+      const path = `/item/${this.libraryItemId}/${this.episode.id}`
+      if (this.$platform !== 'android') return this.$router.push(path)
+      if (this.openingEpisode) return
+      this.openingEpisode = true
+      await this.$nextTick()
+      await waitForEpisodePaint()
+      if (this._isDestroyed) return
+      rememberEpisodePage(this.$store, this.libraryItem, this.episode)
+      // Nuxt's router wrapper uses callbacks; awaiting push alone does not wait for the page.
+      this.$router.push(path, () => { this.openingEpisode = false }, () => {
+        clearEpisodePage(this.$store)
+        this.openingEpisode = false
+      })
     },
     addToPlaylist() {
       this.$emit('addToPlaylist', this.episode)

@@ -57,6 +57,7 @@ import { Capacitor } from '@capacitor/core'
 import { Dialog } from '@capacitor/dialog'
 import { AbsFileSystem, AbsDownloader } from '@/plugins/capacitor'
 import cellularPermissionHelpers from '@/mixins/cellularPermissionHelpers'
+import { takeEpisodePage } from '@/utils/episodeNavigation'
 
 export default {
   async asyncData({ store, params, redirect, app }) {
@@ -71,10 +72,13 @@ export default {
       libraryItem = await app.$db.getLocalLibraryItem(libraryItemId)
       console.log('Got lli', libraryItemId)
     } else if (store.state.user.serverConnectionConfig) {
-      libraryItem = await app.$nativeHttp.get(`/api/items/${libraryItemId}?expanded=1`).catch((error) => {
-        console.error('Failed', error)
-        return false
-      })
+      libraryItem = app.$platform === 'android' ? takeEpisodePage(store, libraryItemId, episodeId) : null
+      if (!libraryItem) {
+        libraryItem = await app.$nativeHttp.get(`/api/items/${libraryItemId}?expanded=1`).catch((error) => {
+          console.error('Failed', error)
+          return false
+        })
+      }
 
       if (libraryItem) {
         const localLibraryItem = await app.$db.getLocalLibraryItemByLId(libraryItemId)
@@ -93,7 +97,7 @@ export default {
     }
 
     episode = libraryItem.media.episodes.find((ep) => ep.id === episodeId)
-    if (localEpisode) {
+    if (episode && localEpisode) {
       // For server episodes that have a matching local episode
       episode.localEpisode = localEpisode
     }
