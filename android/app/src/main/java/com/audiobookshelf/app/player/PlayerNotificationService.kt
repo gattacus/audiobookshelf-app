@@ -128,6 +128,7 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
 
   var currentPlaybackSession: PlaybackSession? = null
   private var initialPlaybackRate: Float? = null
+  internal val continuousPodcastPlayback by lazy { PodcastContinuousPlayback(this) }
 
   private val metadataScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
   private var metadataArtJob: Job? = null
@@ -223,6 +224,7 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
 
   // detach player
   override fun onDestroy() {
+    continuousPodcastPlayback.cancel()
     widgetPlayback.cancel()
     androidAutoBrowseDestroyed = true
     androidAutoBrowseHandler.removeCallbacksAndMessages(null)
@@ -444,6 +446,7 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
                     .setSeekForwardIncrementMs(deviceSettings.jumpForwardTimeMs)
                     .build()
     mPlayer.setHandleAudioBecomingNoisy(true)
+    mPlayer.setWakeMode(C.WAKE_MODE_NETWORK)
     mPlayer.addListener(PlayerListener(this))
     val audioAttributes: AudioAttributes =
             AudioAttributes.Builder()
@@ -466,6 +469,7 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
           playWhenReady: Boolean,
           playbackRate: Float?
   ) {
+    continuousPodcastPlayback.cancel()
     if (!isStarted) {
       Log.i(tag, "preparePlayer: foreground service not started - Starting service --")
       Intent(ctx, PlayerNotificationService::class.java).also { intent ->
@@ -682,30 +686,9 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
   }
 
   fun handlePlaybackEnded() {
-    Log.d(tag, "handlePlaybackEnded")
-    if (isAndroidAuto && currentPlaybackSession?.isPodcastEpisode == true) {
-      Log.d(tag, "Podcast playback ended on android auto")
-      val libraryItem = currentPlaybackSession?.libraryItem ?: return
-
-      // Need to sync with server to set as finished
-      mediaProgressSyncer.finished {
-        // Need to reload media progress
-        mediaManager.loadServerUserMediaProgress {
-          val podcast = libraryItem.media as Podcast
-          val nextEpisode = podcast.getNextUnfinishedEpisode(libraryItem.id, mediaManager)
-          Log.d(tag, "handlePlaybackEnded nextEpisode=$nextEpisode")
-          nextEpisode?.let { podcastEpisode ->
-            mediaManager.play(libraryItem, podcastEpisode, getPlayItemRequestPayload(false)) {
-              if (it == null) {
-                Log.e(tag, "Failed to play library item")
-              } else {
-                val playbackRate = mediaManager.getSavedPlaybackRate()
-                Handler(Looper.getMainLooper()).post { preparePlayer(it, true, playbackRate) }
-              }
-            }
-          }
-        }
-      }
+    val session = currentPlaybackSession ?: return
+    if (session.isPodcastEpisode && continuousPodcastPlayback.choice(session) == true) {
+      continuousPodcastPlayback.advance(session)
     }
   }
 
@@ -998,6 +981,7 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
   }
 
   fun pause() {
+    continuousPodcastPlayback.cancel()
     currentPlayer.pause()
   }
 
@@ -1066,6 +1050,7 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
   }
 
   fun closePlayback(calledOnError: Boolean? = false) {
+    continuousPodcastPlayback.cancel()
     Log.d(tag, "closePlayback")
     val config = DeviceManager.serverConnectionConfig
 

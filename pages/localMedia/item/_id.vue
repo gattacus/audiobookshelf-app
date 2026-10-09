@@ -14,6 +14,7 @@
       <p v-if="!isIos" class="px-2 text-sm mb-0.5 text-fg-muted">{{ $strings.LabelFolder }}: {{ folderName }}</p>
 
       <p class="px-2 mb-4 text-xs text-fg-muted">{{ libraryItemId ? 'Linked to item on server ' + liServerAddress : 'Not linked to server item' }}</p>
+      <podcast-continuous-playback v-if="isPodcast && $platform === 'android'" class="px-2 mb-4" :library-item="localLibraryItem" />
 
       <div class="w-full max-w-full media-item-container overflow-y-auto overflow-x-hidden relative pb-4" :class="{ 'media-order-changed': orderChanged }">
         <div v-if="!isPodcast && audioTracksCopy.length" class="w-full py-2">

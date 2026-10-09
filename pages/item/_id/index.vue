@@ -51,9 +51,9 @@
         <!-- action buttons -->
         <div class="col-span-full">
           <div v-if="showPlay || showRead" class="flex mt-4 -mx-1">
-            <ui-btn v-if="showPlay" color="success" class="flex items-center justify-center flex-grow mx-1" :loading="playerIsStartingForThisMedia" :padding-x="4" @click="playClick">
+            <ui-btn v-if="showPlay" color="success" class="flex items-center justify-center flex-grow mx-1" :disabled="isPodcast && $platform === 'android' && !podcastPlaybackReady" :loading="playerIsStartingForThisMedia" :padding-x="4" @click="playClick">
               <span class="material-symbols text-2xl fill">{{ playerIsPlaying ? 'pause' : 'play_arrow' }}</span>
-              <span class="px-1 text-sm">{{ playerIsPlaying ? $strings.ButtonPause : isPodcast ? $strings.ButtonNextEpisode : hasLocal ? $strings.ButtonPlay : $strings.ButtonStream }}</span>
+              <span class="px-1 text-sm">{{ playerIsPlaying ? $strings.ButtonPause : isPodcast ? continuousPodcastPlayback && !isCasting ? 'Play continuously' : $strings.ButtonNextEpisode : hasLocal ? $strings.ButtonPlay : $strings.ButtonStream }}</span>
             </ui-btn>
             <ui-btn v-if="showRead" color="info" class="flex items-center justify-center mx-1" :class="showPlay ? '' : 'flex-grow'" :padding-x="2" @click="readBook">
               <span class="material-symbols text-2xl">auto_stories</span>
@@ -70,6 +70,8 @@
             <span class="material-symbols">error</span>
             <span class="px-1 text-base">{{ $strings.LabelMissing }}</span>
           </ui-btn>
+
+          <podcast-continuous-playback v-if="isPodcast && showPlay && $platform === 'android'" :library-item="libraryItem" :server-connection-config-id="currentServerConnectionConfigId" @change="continuousPodcastPlayback = $event" @ready="podcastPlaybackReady = $event" />
 
           <div v-if="!isPodcast && progressPercent > 0" class="px-4 py-2 bg-primary text-sm font-semibold rounded-md text-fg mt-4 text-center">
             <p>{{ $strings.LabelYourProgress }}: {{ Math.round(progressPercent * 100) }}%</p>
@@ -221,6 +223,8 @@ export default {
       descriptionClamped: false,
       showFullDescription: false,
       episodeStartingPlayback: null,
+      continuousPodcastPlayback: false,
+      podcastPlaybackReady: false,
       startingDownload: false
     }
   },

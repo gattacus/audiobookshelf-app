@@ -152,9 +152,11 @@ class MediaProgressSyncer(
     Log.d(tag, "pause: Pausing progress syncer for $currentDisplayTitle")
     Log.d(tag, "pause: Last sync time $lastSyncTime")
 
+    val pausedSession = currentPlaybackSession
     val currentTime = playerNotificationService.getCurrentTimeSeconds()
     if (currentTime > 0) { // Current time should always be > 0 on pause
       sync(true, currentTime) { syncResult ->
+        if (currentPlaybackSession !== pausedSession) return@sync cb()
         lastSyncTime = 0L
         Log.d(tag, "pause: Set last sync time 0 $lastSyncTime")
         failedSyncs = 0
@@ -247,6 +249,8 @@ class MediaProgressSyncer(
     }
 
     val hasNetworkConnection = DeviceManager.checkConnectivity(playerNotificationService)
+    val syncingSession = currentPlaybackSession
+    val syncingSessionId = currentSessionId
 
     // Save playback session to db (server linked sessions only)
     //   Sessions are removed once successfully synced with the server
@@ -274,6 +278,10 @@ class MediaProgressSyncer(
                         isConnectedToSameServer
         ) {
           apiHandler.sendLocalProgressSync(it) { syncSuccess, errorMsg ->
+            if (currentPlaybackSession !== syncingSession) {
+              if (syncSuccess) DeviceManager.dbManager.removePlaybackSession(it.id)
+              return@sendLocalProgressSync cb(SyncResult(true, syncSuccess, errorMsg))
+            }
             if (syncSuccess) {
               failedSyncs = 0
               playerNotificationService.alertSyncSuccess()
@@ -298,14 +306,18 @@ class MediaProgressSyncer(
     } else if (hasNetworkConnection && shouldSyncServer) {
       AbsLogger.info("MediaProgressSyncer", "sync: Sending progress sync to server (title: \"$currentDisplayTitle\") (currentTime: $currentTime) (session id: ${currentSessionId}) (${DeviceManager.serverConnectionConfigName})")
 
-      apiHandler.sendProgressSync(currentSessionId, syncData) { syncSuccess, errorMsg ->
+      apiHandler.sendProgressSync(syncingSessionId, syncData) { syncSuccess, errorMsg ->
+        if (currentPlaybackSession !== syncingSession) {
+          if (syncSuccess) DeviceManager.dbManager.removePlaybackSession(syncingSessionId)
+          return@sendProgressSync cb(SyncResult(true, syncSuccess, errorMsg))
+        }
         if (syncSuccess) {
           AbsLogger.info("MediaProgressSyncer", "sync: Successfully synced progress (title: \"$currentDisplayTitle\") (currentTime: $currentTime) (session id: ${currentSessionId}) (${DeviceManager.serverConnectionConfigName})")
 
           failedSyncs = 0
           playerNotificationService.alertSyncSuccess()
           lastSyncTime = System.currentTimeMillis()
-          DeviceManager.dbManager.removePlaybackSession(currentSessionId) // Remove session from db
+          DeviceManager.dbManager.removePlaybackSession(syncingSessionId) // Remove only the synced session
         } else {
           failedSyncs++
           if (failedSyncs == 2) {
@@ -322,12 +334,24 @@ class MediaProgressSyncer(
     }
   }
 
+  fun completeForContinuousPlayback(endedSession: PlaybackSession) {
+    val session = currentPlaybackSession?.takeIf { it.id == endedSession.id } ?: endedSession.clone()
+    session.currentTime = session.getTotalDuration()
+    session.updatedAt = System.currentTimeMillis()
+    DeviceManager.dbManager.savePlaybackSession(session)
+    if (session.isLocal) saveLocalProgress(session)
+    listeningTimerTask?.cancel()
+    listeningTimerTask = null
+    listeningTimerRunning = false
+    reset()
+  }
+
   private fun saveLocalProgress(playbackSession: PlaybackSession) {
     if (currentLocalMediaProgress == null) {
       val mediaProgress =
               DeviceManager.dbManager.getLocalMediaProgress(playbackSession.localMediaProgressId)
       if (mediaProgress == null) {
-        currentLocalMediaProgress = playbackSession.getNewLocalMediaProgress()
+        currentLocalMediaProgress = playbackSession.getNewLocalMediaProgress().also { it.updateFromPlaybackSession(playbackSession) }
       } else {
         currentLocalMediaProgress = mediaProgress
         currentLocalMediaProgress?.updateFromPlaybackSession(playbackSession)

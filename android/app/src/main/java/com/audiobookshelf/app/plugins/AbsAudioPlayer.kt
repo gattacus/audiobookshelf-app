@@ -18,6 +18,7 @@ import com.audiobookshelf.app.media.MediaEventManager
 import com.audiobookshelf.app.player.CastManager
 import com.audiobookshelf.app.player.PlayerListener
 import com.audiobookshelf.app.player.PlayerNotificationService
+import com.audiobookshelf.app.player.PodcastPlaybackPreferences
 import com.audiobookshelf.app.server.ApiHandler
 import com.fasterxml.jackson.core.json.JsonReadFeature
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -45,6 +46,38 @@ class AbsAudioPlayer : Plugin() {
   // Track foreground state to avoid flooding WebView with events while backgrounded
   private var isInForeground: Boolean = true
   private val pendingPlaybackStateCalls = mutableListOf<PluginCall>()
+
+  private fun podcastPreferenceKey(call: PluginCall): String? {
+    val id = call.getString("libraryItemId")?.takeIf { it.isNotBlank() } ?: return null
+    if (id.startsWith("local")) {
+      val local = runCatching { DeviceManager.dbManager.getLocalLibraryItem(id) }.getOrNull() ?: return null
+      if (local.mediaType != "podcast") return null
+      return PodcastPlaybackPreferences.key(local.serverConnectionConfigId, local.libraryItemId, local.id)
+    }
+    return PodcastPlaybackPreferences.key(call.getString("serverConnectionConfigId"), id, null)
+  }
+
+  @PluginMethod
+  fun getPodcastContinuousPlayback(call: PluginCall) {
+    val key = podcastPreferenceKey(call) ?: return call.reject("Invalid podcast identity")
+    call.resolve(JSObject().put("enabled", PodcastPlaybackPreferences(context).get(key) == true))
+  }
+
+  @PluginMethod
+  fun setPodcastContinuousPlayback(call: PluginCall) {
+    val key = podcastPreferenceKey(call) ?: return call.reject("Invalid podcast identity")
+    val enabled = call.getBoolean("enabled") ?: return call.reject("Missing continuous playback choice")
+    val preferences = PodcastPlaybackPreferences(context)
+    preferences.set(key, enabled)
+    call.getString("podcastType")?.takeIf { it == "serial" || it == "episodic" }?.let { preferences.set("$key:serial", it == "serial") }
+    Handler(Looper.getMainLooper()).post {
+      if (::playerNotificationService.isInitialized && !enabled) {
+        val playback = playerNotificationService.continuousPodcastPlayback
+        playerNotificationService.currentPlaybackSession?.let { if (playback.key(it) == key) playback.cancel() }
+      }
+      call.resolve(JSObject().put("enabled", enabled))
+    }
+  }
 
   @PluginMethod
   fun getPlaybackState(call: PluginCall) {
@@ -290,6 +323,7 @@ class AbsAudioPlayer : Plugin() {
 
   @PluginMethod
   fun prepareLibraryItem(call: PluginCall) {
+    Handler(Looper.getMainLooper()).post { playerNotificationService.continuousPodcastPlayback.cancel() }
     val libraryItemId = call.getString("libraryItemId", "").toString()
     val episodeId = call.getString("episodeId", "").toString()
     val playWhenReady = call.getBoolean("playWhenReady") == true

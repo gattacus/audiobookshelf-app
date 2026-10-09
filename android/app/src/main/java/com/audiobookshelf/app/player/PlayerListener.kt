@@ -18,6 +18,10 @@ class PlayerListener(var playerNotificationService:PlayerNotificationService) : 
     var lazyIsPlaying: Boolean = false
   }
 
+  override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+    if (!playWhenReady) playerNotificationService.continuousPodcastPlayback.cancel()
+  }
+
   override fun onPlayerError(error: PlaybackException) {
     val errorMessage = error.message ?: "Unknown Error"
     Log.e(tag, "onPlayerError $errorMessage")
@@ -97,7 +101,7 @@ class PlayerListener(var playerNotificationService:PlayerNotificationService) : 
 
     // Start/stop progress sync interval
     if (isPlaying) {
-      val playbackSession: PlaybackSession? = playerNotificationService.mediaProgressSyncer.currentPlaybackSession ?: playerNotificationService.currentPlaybackSession
+      val playbackSession: PlaybackSession? = playerNotificationService.currentPlaybackSession ?: playerNotificationService.mediaProgressSyncer.currentPlaybackSession
       playbackSession?.let {
         // Handles auto-starting sleep timer and resetting sleep timer
         playerNotificationService.sleepTimerManager.handleMediaPlayEvent(it.id)

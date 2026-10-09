@@ -242,7 +242,8 @@ class PodcastMetadata(
   var author:String?,
   var feedUrl:String?,
   var genres:MutableList<String>,
-  explicit:Boolean
+  explicit:Boolean,
+  var type:String? = null
 ) : MediaTypeMetadata(title, explicit) {
   @JsonIgnore
   override fun getAuthorDisplayName():String { return author ?: "Unknown" }
