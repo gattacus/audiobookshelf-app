@@ -63,31 +63,34 @@ internal class WidgetPlayback(private val service: PlayerNotificationService) {
         playLocal(target, local, currentRequest)
       } else {
         DeviceManager.serverConnectionConfig = config
-        if (target.mediaType == "book") {
-          service.apiHandler.playLibraryItem(target.serverItemId, null, service.getPlayItemRequestPayload(false)) { session ->
-            if (session != null) prepare(session, currentRequest) else playLocal(target, local, currentRequest)
-          }
-        } else {
-          service.apiHandler.authorize(config) { progress ->
-            if (!requests.isCurrent(currentRequest)) return@authorize
-            if (progress == null) {
-              playLocal(target, local, currentRequest)
-            } else service.apiHandler.getLibraryItem(target.serverItemId) { item ->
-              if (!requests.isCurrent(currentRequest)) return@getLibraryItem
-              val podcast = item?.media as? Podcast
-              val episodes = podcast?.episodes.orEmpty()
-              val selected = selectServerEpisode(episodes, progress, target, local)
-              if (selected == null) {
+        service.apiHandler.syncLocalSessionsAndProgress { _, _ ->
+          if (!requests.isCurrent(currentRequest)) return@syncLocalSessionsAndProgress
+          if (target.mediaType == "book") {
+            service.apiHandler.playLibraryItem(target.serverItemId, null, service.getPlayItemRequestPayload(false)) { session ->
+              if (session != null) prepare(session, currentRequest) else playLocal(target, local, currentRequest)
+            }
+          } else {
+            service.apiHandler.authorize(config) { progress ->
+              if (!requests.isCurrent(currentRequest)) return@authorize
+              if (progress == null) {
                 playLocal(target, local, currentRequest)
-                return@getLibraryItem
-              }
-              val localEpisode = local?.let { lli ->
-                (lli.media as? Podcast)?.episodes?.find { it.serverEpisodeId == selected.id && safeHasTracks(lli, it) }
-              }
-              if (localEpisode != null && local != null && prepareLocal(local, localEpisode, currentRequest)) {
-                return@getLibraryItem
-              } else service.apiHandler.playLibraryItem(target.serverItemId, selected.id, service.getPlayItemRequestPayload(false)) { session ->
-                if (session != null) prepare(session, currentRequest) else playLocal(target, local, currentRequest)
+              } else service.apiHandler.getLibraryItem(target.serverItemId) { item ->
+                if (!requests.isCurrent(currentRequest)) return@getLibraryItem
+                val podcast = item?.media as? Podcast
+                val episodes = podcast?.episodes.orEmpty()
+                val selected = selectServerEpisode(episodes, progress, target, local)
+                if (selected == null) {
+                  playLocal(target, local, currentRequest)
+                  return@getLibraryItem
+                }
+                val localEpisode = local?.let { lli ->
+                  (lli.media as? Podcast)?.episodes?.find { it.serverEpisodeId == selected.id && safeHasTracks(lli, it) }
+                }
+                if (localEpisode != null && prepareLocal(local, localEpisode, currentRequest)) {
+                  return@getLibraryItem
+                } else service.apiHandler.playLibraryItem(target.serverItemId, selected.id, service.getPlayItemRequestPayload(false)) { session ->
+                  if (session != null) prepare(session, currentRequest) else playLocal(target, local, currentRequest)
+                }
               }
             }
           }

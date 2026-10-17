@@ -288,24 +288,10 @@ class AbsDatabase : Plugin() {
       return call.resolve()
     }
 
-    apiHandler.syncLocalMediaProgressForUser {
-      val savedSessions = DeviceManager.dbManager.getPlaybackSessions().filter { it.serverConnectionConfigId == DeviceManager.serverConnectionConfigId }
-
-      if (savedSessions.isNotEmpty()) {
-        apiHandler.sendSyncLocalSessions(savedSessions) { success, errorMsg ->
-          if (!success) {
-            call.resolve(JSObject("{\"error\":\"$errorMsg\"}"))
-          } else {
-            AbsLogger.info("AbsDatabase", "syncLocalSessionsWithServer: Finished sending local playback sessions to server. Removing ${savedSessions.size} saved sessions.")
-            // Remove all local sessions
-            savedSessions.forEach {
-              DeviceManager.dbManager.removePlaybackSession(it.id)
-            }
-            call.resolve()
-          }
-        }
+    apiHandler.syncLocalSessionsAndProgress { success, errorMsg ->
+      if (!success && !errorMsg.isNullOrEmpty()) {
+        call.resolve(JSObject("{\"error\":\"$errorMsg\"}"))
       } else {
-        AbsLogger.info("AbsDatabase", "syncLocalSessionsWithServer: No saved local playback sessions to send to server.")
         call.resolve()
       }
     }
@@ -441,23 +427,21 @@ class AbsDatabase : Plugin() {
     Log.d(tag, "updateLocalMediaProgressFinished: Local Media Progress String $lmpstring")
 
     // Send update to server media progress is linked to a server and user is logged into that server
-    localMediaProgress.serverConnectionConfigId?.let { configId ->
-      if (DeviceManager.serverConnectionConfigId == configId) {
-        val libraryItemId = localMediaProgress.libraryItemId ?: ""
-        val episodeId = localMediaProgress.episodeId ?: ""
-        val updatePayload = JSObject()
-        updatePayload.put("isFinished", isFinished)
-        apiHandler.updateMediaProgress(libraryItemId,episodeId,updatePayload) {
-          Log.d(tag, "updateLocalMediaProgressFinished: Updated media progress isFinished on server")
-          val jsobj = JSObject()
-          jsobj.put("local", true)
-          jsobj.put("server", true)
-          jsobj.put("localMediaProgress", JSObject(lmpstring))
-          call.resolve(jsobj)
-        }
+    val configId = localMediaProgress.serverConnectionConfigId
+    if (configId != null && DeviceManager.serverConnectionConfigId == configId && DeviceManager.checkConnectivity(mainActivity)) {
+      val libraryItemId = localMediaProgress.libraryItemId ?: ""
+      val episodeId = localMediaProgress.episodeId ?: ""
+      val updatePayload = JSObject()
+      updatePayload.put("isFinished", isFinished)
+      apiHandler.updateMediaProgress(libraryItemId, episodeId, updatePayload) { ok ->
+        Log.d(tag, "updateLocalMediaProgressFinished: Updated media progress isFinished on server (ok=$ok)")
+        val jsobj = JSObject()
+        jsobj.put("local", true)
+        jsobj.put("server", ok)
+        jsobj.put("localMediaProgress", JSObject(lmpstring))
+        call.resolve(jsobj)
       }
-    }
-    if (localMediaProgress.serverConnectionConfigId == null || DeviceManager.serverConnectionConfigId != localMediaProgress.serverConnectionConfigId) {
+    } else {
       val jsobj = JSObject()
       jsobj.put("local", true)
       jsobj.put("server", false)

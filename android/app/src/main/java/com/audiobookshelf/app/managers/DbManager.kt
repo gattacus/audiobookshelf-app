@@ -238,14 +238,17 @@ class DbManager {
   // For books this will just be the localLibraryItemId for podcast episodes this will be
   // "{localLibraryItemId}-{episodeId}"
   fun getLocalMediaProgress(localMediaProgressId: String): LocalMediaProgress? {
-    return Paper.book("localMediaProgress").read(localMediaProgressId)
+    return runCatching { Paper.book("localMediaProgress").read<LocalMediaProgress>(localMediaProgressId) }
+            .getOrNull()
+            ?.takeIf { runCatching { it.id.isNotBlank() }.getOrDefault(false) }
   }
   fun getAllLocalMediaProgress(): List<LocalMediaProgress> {
     val mediaProgress: MutableList<LocalMediaProgress> = mutableListOf()
     Paper.book("localMediaProgress").allKeys.forEach { localMediaProgressId ->
-      Paper.book("localMediaProgress").read<LocalMediaProgress>(localMediaProgressId)?.let {
-        mediaProgress.add(it)
-      }
+      runCatching { Paper.book("localMediaProgress").read<LocalMediaProgress>(localMediaProgressId) }
+              .getOrNull()
+              ?.takeIf { runCatching { it.id.isNotBlank() }.getOrDefault(false) }
+              ?.let { mediaProgress.add(it) }
     }
     return mediaProgress
   }
@@ -389,15 +392,18 @@ class DbManager {
   fun savePlaybackSession(playbackSession: PlaybackSession) {
     Paper.book("playbackSession").write(playbackSession.id, playbackSession)
   }
+  fun getPlaybackSession(playbackSessionId: String): PlaybackSession? {
+    return runCatching { Paper.book("playbackSession").read<PlaybackSession>(playbackSessionId) }
+            .getOrNull()
+            ?.takeIf { runCatching { it.id.isNotBlank() }.getOrDefault(false) }
+  }
   fun removePlaybackSession(playbackSessionId: String) {
     Paper.book("playbackSession").delete(playbackSessionId)
   }
   fun getPlaybackSessions(): List<PlaybackSession> {
     val sessions: MutableList<PlaybackSession> = mutableListOf()
     Paper.book("playbackSession").allKeys.forEach { playbackSessionId ->
-      Paper.book("playbackSession").read<PlaybackSession>(playbackSessionId)?.let {
-        sessions.add(it)
-      }
+      getPlaybackSession(playbackSessionId)?.let { sessions.add(it) }
     }
     return sessions
   }

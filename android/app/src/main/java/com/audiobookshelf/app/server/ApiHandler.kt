@@ -10,7 +10,11 @@ import com.audiobookshelf.app.data.*
 import com.audiobookshelf.app.device.DeviceManager
 import com.audiobookshelf.app.media.MediaEventManager
 import com.audiobookshelf.app.media.AndroidAutoShelfResponse
+import com.audiobookshelf.app.media.LocalProgressReconciler
 import com.audiobookshelf.app.media.MediaProgressSyncData
+import com.audiobookshelf.app.media.MediaProgressSyncer
+import com.audiobookshelf.app.media.OfflineSessionCleanup
+import com.audiobookshelf.app.media.OfflineSyncCoordinator
 import com.audiobookshelf.app.media.SyncResult
 import com.audiobookshelf.app.models.User
 import com.audiobookshelf.app.BuildConfig
@@ -32,6 +36,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class ApiHandler(var ctx:Context) {
   val tag = "ApiHandler"
@@ -39,6 +44,7 @@ class ApiHandler(var ctx:Context) {
   companion object {
     // For sending data back to the Webview frontend
     lateinit var absDatabaseNotifyListeners:(String, JSObject) -> Unit
+    internal val offlineSyncCoordinator = OfflineSyncCoordinator()
 
     fun checkAbsDatabaseNotifyListenersInitted():Boolean {
       return ::absDatabaseNotifyListeners.isInitialized
@@ -62,7 +68,7 @@ class ApiHandler(var ctx:Context) {
       val request = Request.Builder()
         .url("${address}$endpoint").addHeader("Authorization", "Bearer $token")
         .build()
-      makeRequest(request, httpClient, cb)
+      makeRequest(request, httpClient, cb, config)
     } catch(e: Exception) {
       e.printStackTrace()
       val jsobj = JSObject()
@@ -82,7 +88,7 @@ class ApiHandler(var ctx:Context) {
       val request = Request.Builder().post(requestBody)
         .url(requestUrl).addHeader("Authorization", "Bearer ${token}")
         .build()
-      makeRequest(request, null, cb)
+      makeRequest(request, null, cb, config)
     } catch(e: Exception) {
       e.printStackTrace()
       val jsobj = JSObject()
@@ -91,14 +97,14 @@ class ApiHandler(var ctx:Context) {
     }
   }
 
-  private fun patchRequest(endpoint:String, payload: JSObject, cb: (JSObject) -> Unit) {
+  private fun patchRequest(endpoint:String, payload: JSObject, config:ServerConnectionConfig? = null, cb: (JSObject) -> Unit) {
     val mediaType = "application/json; charset=utf-8".toMediaType()
     val requestBody = payload.toString().toRequestBody(mediaType)
     try {
       val request = Request.Builder().patch(requestBody)
-        .url("${DeviceManager.serverAddress}$endpoint").addHeader("Authorization", "Bearer ${DeviceManager.token}")
+        .url("${config?.address ?: DeviceManager.serverAddress}$endpoint").addHeader("Authorization", "Bearer ${config?.token ?: DeviceManager.token}")
         .build()
-      makeRequest(request, null, cb)
+      makeRequest(request, null, cb, config)
     } catch(e: Exception) {
       e.printStackTrace()
       val jsobj = JSObject()
@@ -107,7 +113,7 @@ class ApiHandler(var ctx:Context) {
     }
   }
 
-  private fun makeRequest(request:Request, httpClient:OkHttpClient?, cb: (JSObject) -> Unit) {
+  private fun makeRequest(request:Request, httpClient:OkHttpClient?, cb: (JSObject) -> Unit, config:ServerConnectionConfig? = null) {
     val client = httpClient ?: defaultClient
 
     client.newCall(request).enqueue(object : Callback {
@@ -125,7 +131,7 @@ class ApiHandler(var ctx:Context) {
           if (it.code == 401) {
             // Handle 401 Unauthorized by attempting token refresh
             AbsLogger.info(tag, "makeRequest: 401 Unauthorized for request to \"${request.url}\" - attempt token refresh")
-            handleTokenRefresh(request, httpClient, cb)
+            handleTokenRefresh(request, httpClient, cb, config)
             return
           }
 
@@ -174,8 +180,8 @@ class ApiHandler(var ctx:Context) {
    * @param httpClient The HTTP client to use for the request
    * @param callback The callback to return the response
    */
-  private fun handleTokenRefresh(originalRequest: Request, httpClient: OkHttpClient?, callback: (JSObject) -> Unit) {
-    val serverConnectionConfigId = DeviceManager.serverConnectionConfigId
+  private fun handleTokenRefresh(originalRequest: Request, httpClient: OkHttpClient?, callback: (JSObject) -> Unit, config: ServerConnectionConfig? = null) {
+    val serverConnectionConfigId = config?.id ?: DeviceManager.serverConnectionConfigId
     refreshAuthTokens(serverConnectionConfigId, httpClient) { result ->
       if (result is RefreshResult.Success) {
         retryOriginalRequest(originalRequest, result.accessToken, httpClient, callback)
@@ -391,8 +397,8 @@ class ApiHandler(var ctx:Context) {
     }
   }
 
-  fun getCurrentUser(cb: (User?) -> Unit) {
-    getRequest("/api/me", null, null) {
+  fun getCurrentUser(config:ServerConnectionConfig? = null, cb: (User?) -> Unit) {
+    getRequest("/api/me", null, config) {
       if (it.has("error")) {
         Log.e(tag, it.getString("error") ?: "getCurrentUser Failed")
         cb(null)
@@ -642,12 +648,13 @@ class ApiHandler(var ctx:Context) {
     }
   }
 
-  fun updateMediaProgress(libraryItemId:String,episodeId:String?,updatePayload:JSObject, cb: () -> Unit) {
+  fun updateMediaProgress(libraryItemId:String,episodeId:String?,updatePayload:JSObject, config:ServerConnectionConfig? = null, cb: (Boolean) -> Unit) {
     Log.d(tag, "updateMediaProgress $libraryItemId $episodeId $updatePayload")
     val endpoint = if(episodeId.isNullOrEmpty()) "/api/me/progress/$libraryItemId" else "/api/me/progress/$libraryItemId/$episodeId"
-    patchRequest(endpoint,updatePayload) {
-      Log.d(tag, "updateMediaProgress patched progress")
-      cb()
+    patchRequest(endpoint,updatePayload,config) {
+      val ok = it.getString("error").isNullOrEmpty()
+      Log.d(tag, "updateMediaProgress patched progress ok=$ok")
+      cb(ok)
     }
   }
 
@@ -721,17 +728,20 @@ class ApiHandler(var ctx:Context) {
     }
   }
 
-  fun sendSyncLocalSessions(playbackSessions:List<PlaybackSession>, cb: (Boolean, String?) -> Unit) {
+  fun sendSyncLocalSessions(playbackSessions:List<PlaybackSession>, config:ServerConnectionConfig? = null, cb: (Boolean, String?) -> Unit) {
+    val validSessions = OfflineSessionCleanup.validSessions(playbackSessions)
+    if (validSessions.isEmpty()) return cb(true, null)
+
     @SuppressLint("HardwareIds")
     val deviceId = Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID)
     val deviceInfo = DeviceInfo(deviceId, Build.MANUFACTURER, Build.MODEL, Build.VERSION.SDK_INT, BuildConfig.VERSION_NAME)
 
-    val json = jacksonMapper.createObjectNode();
-    json.putArray("sessions").addAll(playbackSessions.map(::createPartialPlaybackSession))
+    val json = jacksonMapper.createObjectNode()
+    json.putArray("sessions").addAll(validSessions.map(::createPartialPlaybackSession))
     json.set<ObjectNode>("deviceInfo", jacksonMapper.valueToTree(deviceInfo))
-    AbsLogger.info("ApiHandler", "sendSyncLocalSessions: Sending ${playbackSessions.size} saved local playback sessions to server (${DeviceManager.serverConnectionConfigName})")
+    AbsLogger.info("ApiHandler", "sendSyncLocalSessions: Sending ${validSessions.size} saved local playback sessions to server (${DeviceManager.serverConnectionConfigName})")
 
-    postRequest("/api/session/local-all", JSObject(json.toString()), null) {
+    postRequest("/api/session/local-all", JSObject(json.toString()), config) {
       if (!it.getString("error").isNullOrEmpty()) {
         AbsLogger.error("ApiHandler", "sendSyncLocalSessions: Failed to sync local sessions. (${it.getString("error")})")
         cb(false, it.getString("error"))
@@ -740,7 +750,7 @@ class ApiHandler(var ctx:Context) {
         response.results.forEach { localSessionSyncResult ->
           Log.d(tag, "Synced session result ${localSessionSyncResult.id}|${localSessionSyncResult.progressSynced}|${localSessionSyncResult.success}")
 
-          playbackSessions.find { ps -> ps.id == localSessionSyncResult.id }?.let { session ->
+          validSessions.find { ps -> ps.id == localSessionSyncResult.id }?.let { session ->
             if (localSessionSyncResult.progressSynced == true) {
               val syncResult = SyncResult(true, true, "Progress synced on server")
               MediaEventManager.saveEvent(session, syncResult)
@@ -753,16 +763,30 @@ class ApiHandler(var ctx:Context) {
             }
           }
         }
+
+        val currentStored = DeviceManager.dbManager.getPlaybackSessions().associateBy { ps -> ps.id }
+        val removableIds = OfflineSessionCleanup.idsToRemoveAfterBatchSync(
+          validSessions,
+          response.results,
+          currentStored,
+          MediaProgressSyncer.activePlaybackSession
+        )
+        removableIds.forEach { sessionId ->
+          DeviceManager.dbManager.removePlaybackSession(sessionId)
+        }
+        AbsLogger.info("ApiHandler", "sendSyncLocalSessions: Removed ${removableIds.size}/${validSessions.size} synced sessions from local db.")
         cb(true, null)
       }
     }
   }
 
-  fun syncLocalMediaProgressForUser(cb: () -> Unit) {
+  fun syncLocalMediaProgressForUser(config:ServerConnectionConfig? = DeviceManager.serverConnectionConfig?.copy(), cb: () -> Unit) {
     AbsLogger.info("ApiHandler", "[ApiHandler] syncLocalMediaProgressForUser: Server connection ${DeviceManager.serverConnectionConfigName}")
 
+    if (config == null || !isCurrentConfig(config)) return cb()
+    val configId = config.id
     // Get all local media progress for this server
-    val allLocalMediaProgress = DeviceManager.dbManager.getAllLocalMediaProgress().filter { it.serverConnectionConfigId == DeviceManager.serverConnectionConfigId }
+    val allLocalMediaProgress = DeviceManager.dbManager.getAllLocalMediaProgress().filter { it.serverConnectionConfigId == configId }
     if (allLocalMediaProgress.isEmpty()) {
       AbsLogger.info("ApiHandler", "[ApiHandler] syncLocalMediaProgressForUser: No local media progress to sync")
       return cb()
@@ -770,63 +794,86 @@ class ApiHandler(var ctx:Context) {
 
     AbsLogger.info("ApiHandler", "syncLocalMediaProgressForUser: Found ${allLocalMediaProgress.size} local media progress")
 
-    getCurrentUser { user ->
+    getCurrentUser(config) { user ->
+      // Never apply a response to a different selection, even when both accounts use the same URL.
+      if (!isCurrentConfig(config)) return@getCurrentUser cb()
       if (user == null) {
         AbsLogger.error("ApiHandler", "syncLocalMediaProgressForUser: Failed to load user from server (${DeviceManager.serverConnectionConfigName})")
+        cb()
       } else {
-        var numLocalMediaProgressUptToDate = 0
-        var numLocalMediaProgressUpdated = 0
+        val unsyncedSessions = DeviceManager.dbManager.getPlaybackSessions().filter { it.serverConnectionConfigId == configId }
+        val plan = LocalProgressReconciler.reconcile(allLocalMediaProgress, user.mediaProgress, unsyncedSessions)
 
-        // Compare server user progress with local progress
-        user.mediaProgress.forEach { mediaProgress ->
-          // Get matching local media progress
-          allLocalMediaProgress.find { it.isMatch(mediaProgress) }?.let { localMediaProgress ->
-            if (mediaProgress.lastUpdate > localMediaProgress.lastUpdate) {
-              val updateLogs = mutableListOf<String>()
-              if (mediaProgress.progress != localMediaProgress.progress) {
-                updateLogs.add("Updated progress from ${localMediaProgress.progress} to ${mediaProgress.progress}")
-              }
-              if (mediaProgress.currentTime != localMediaProgress.currentTime) {
-                updateLogs.add("Updated currentTime from ${localMediaProgress.currentTime} to ${mediaProgress.currentTime}")
-              }
-              if (mediaProgress.isFinished != localMediaProgress.isFinished) {
-                updateLogs.add("Updated isFinished from ${localMediaProgress.isFinished} to ${mediaProgress.isFinished}")
-              }
-              if (mediaProgress.ebookProgress != localMediaProgress.ebookProgress) {
-                updateLogs.add("Updated ebookProgress from ${localMediaProgress.isFinished} to ${mediaProgress.isFinished}")
-              }
-              if (updateLogs.isNotEmpty()) {
-                AbsLogger.info("ApiHandler", "syncLocalMediaProgressForUser: Server progress for item \"${mediaProgress.mediaItemId}\" is more recent than local (server lastUpdate=${mediaProgress.lastUpdate}, local lastUpdate=${localMediaProgress.lastUpdate}). ${updateLogs.joinToString()}")
-              }
+        plan.updatedLocalItems.forEach { localMediaProgress ->
+          user.mediaProgress.find { localMediaProgress.isMatch(it) }?.let { mediaProgress ->
+            MediaEventManager.syncEvent(mediaProgress, "Sync on server connection")
+          }
+          DeviceManager.dbManager.saveLocalMediaProgress(localMediaProgress)
+        }
 
-              localMediaProgress.updateFromServerMediaProgress(mediaProgress)
+        if (plan.serverPatches.isEmpty()) {
+          AbsLogger.info("ApiHandler", "syncLocalMediaProgressForUser: Finished syncing local media progress with server. ${plan.updatedLocalItems.size} updated from server, 0 patched to server")
+          cb()
+        } else {
+          val remainingPatches = AtomicInteger(plan.serverPatches.size)
+          plan.serverPatches.forEach { patch ->
+            if (!isCurrentConfig(config)) {
+              if (remainingPatches.decrementAndGet() == 0) cb()
+              return@forEach
+            }
+            val updatePayload = JSObject()
+            patch.isFinished?.let { updatePayload.put("isFinished", it) }
+            patch.currentTime?.let { updatePayload.put("currentTime", it) }
+            patch.progress?.let { updatePayload.put("progress", it) }
+            patch.finishedAt?.let { updatePayload.put("finishedAt", it) }
+            patch.startedAt?.let { updatePayload.put("startedAt", it) }
+            patch.ebookLocation?.let { updatePayload.put("ebookLocation", it) }
+            patch.ebookProgress?.let { updatePayload.put("ebookProgress", it) }
+            updatePayload.put("lastUpdate", patch.lastUpdate)
 
-              // Only report sync if progress changed
-              if (updateLogs.isNotEmpty()) {
-                MediaEventManager.syncEvent(mediaProgress, "Sync on server connection")
+            updateMediaProgress(patch.libraryItemId, patch.episodeId, updatePayload, config) { ok ->
+              if (ok) {
+                AbsLogger.info("ApiHandler", "syncLocalMediaProgressForUser: Successfully patched server progress for item \"${patch.libraryItemId}\"")
+              } else {
+                AbsLogger.error("ApiHandler", "syncLocalMediaProgressForUser: Failed to patch server progress for item \"${patch.libraryItemId}\"")
               }
-              DeviceManager.dbManager.saveLocalMediaProgress(localMediaProgress)
-              numLocalMediaProgressUpdated++
-            } else if (localMediaProgress.lastUpdate > mediaProgress.lastUpdate && localMediaProgress.ebookLocation != null && localMediaProgress.ebookLocation != mediaProgress.ebookLocation) {
-              // Patch ebook progress to server
-              AbsLogger.info("ApiHandler", "syncLocalMediaProgressForUser: Local progress for ebook item \"${mediaProgress.mediaItemId}\" is more recent than server progress. Local progress last updated ${localMediaProgress.lastUpdate}, server progress last updated ${mediaProgress.lastUpdate}. Sending server request to update ebook progress from ${mediaProgress.ebookProgress} to ${localMediaProgress.ebookProgress}")
-              val endpoint = "/api/me/progress/${localMediaProgress.libraryItemId}"
-              val updatePayload = JSObject()
-              updatePayload.put("ebookLocation", localMediaProgress.ebookLocation)
-              updatePayload.put("ebookProgress", localMediaProgress.ebookProgress)
-              updatePayload.put("lastUpdate", localMediaProgress.lastUpdate)
-              patchRequest(endpoint,updatePayload) {
-                AbsLogger.info("ApiHandler", "syncLocalMediaProgressForUser: Successfully updated server ebook progress for item item \"${mediaProgress.mediaItemId}\"")
+              if (remainingPatches.decrementAndGet() == 0) {
+                AbsLogger.info("ApiHandler", "syncLocalMediaProgressForUser: Finished syncing local media progress with server. ${plan.updatedLocalItems.size} updated from server, ${plan.serverPatches.size} patched to server")
+                cb()
               }
-            } else {
-              numLocalMediaProgressUptToDate++
             }
           }
         }
-
-        AbsLogger.info("ApiHandler", "syncLocalMediaProgressForUser: Finishing syncing local media progress with server. $numLocalMediaProgressUptToDate up-to-date, $numLocalMediaProgressUpdated updated")
       }
-      cb()
     }
+  }
+
+  private fun isCurrentConfig(config: ServerConnectionConfig): Boolean {
+    val current = DeviceManager.serverConnectionConfig ?: return false
+    return current.id == config.id && current.address == config.address && current.userId == config.userId
+  }
+
+  fun syncLocalSessionsAndProgress(cb: (Boolean, String?) -> Unit = { _, _ -> }) {
+    // Keep every phase (including token refresh) attached to this account, not mutable global state.
+    val config = DeviceManager.serverConnectionConfig?.copy()
+    val configId = config?.id
+    offlineSyncCoordinator.sync(
+      serverConfigId = configId,
+      pushSessions = { pushCb ->
+        val savedSessions = DeviceManager.dbManager.getPlaybackSessions()
+          .filter { it.serverConnectionConfigId == configId }
+          .map { it.clone() }
+        if (savedSessions.isNotEmpty()) {
+          sendSyncLocalSessions(savedSessions, config, pushCb)
+        } else {
+          AbsLogger.info("ApiHandler", "syncLocalSessionsAndProgress: No saved local playback sessions to send to server.")
+          pushCb(true, null)
+        }
+      },
+      reconcileProgress = { reconcileCb ->
+        syncLocalMediaProgressForUser(config, reconcileCb)
+      },
+      onComplete = cb
+    )
   }
 }

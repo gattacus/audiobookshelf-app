@@ -29,16 +29,26 @@ class MediaProgressSyncer(
         val playerNotificationService: PlayerNotificationService,
         private val apiHandler: ApiHandler
 ) {
+  companion object {
+    @Volatile var activePlaybackSession: PlaybackSession? = null
+  }
+
   private val tag = "MediaProgressSync"
-  private val METERED_CONNECTION_SYNC_INTERVAL = 60000
+  private val METERED_CONNECTION_SYNC_INTERVAL = 60000L
 
   private var listeningTimerTask: TimerTask? = null
   var listeningTimerRunning: Boolean = false
 
-  private var lastSyncTime: Long = 0
+  internal val timeTracker = ListeningTimeTracker()
+  private val lastSyncTime: Long
+    get() = timeTracker.lastTickTime
   private var failedSyncs: Int = 0
 
   var currentPlaybackSession: PlaybackSession? = null // copy of pb session currently syncing
+    set(value) {
+      field = value
+      activePlaybackSession = value?.clone()
+    }
   var currentLocalMediaProgress: LocalMediaProgress? = null
 
   private val currentDisplayTitle
@@ -51,24 +61,26 @@ class MediaProgressSyncer(
     get() = currentPlaybackSession?.duration ?: 0.0
 
   fun start(playbackSession: PlaybackSession) {
+    val isSameSession = playbackSession.id == currentSessionId
     if (listeningTimerRunning) {
       Log.d(tag, "start: Timer already running for $currentDisplayTitle")
-      if (playbackSession.id != currentSessionId) {
+      if (!isSameSession) {
         Log.d(tag, "Playback session changed, reset timer")
         currentLocalMediaProgress = null
         listeningTimerTask?.cancel()
-        lastSyncTime = 0L
+        timeTracker.onPauseOrReset()
         Log.d(tag, "start: Set last sync time 0 $lastSyncTime")
         failedSyncs = 0
       } else {
         return
       }
-    } else if (playbackSession.id != currentSessionId) {
+    } else if (!isSameSession) {
       currentLocalMediaProgress = null
     }
 
     listeningTimerRunning = true
-    lastSyncTime = System.currentTimeMillis()
+    val now = System.currentTimeMillis()
+    timeTracker.start(now, isSameSession)
     currentPlaybackSession = playbackSession.clone()
     Log.d(
             tag,
@@ -83,11 +95,13 @@ class MediaProgressSyncer(
                   playerNotificationService.sleepTimerManager.checkAutoSleepTimer()
 
                   // Only sync with server on unmetered connection every 15s OR sync with server if
-                  // last sync time is >= 60s
+                  // last server sync time is >= 60s
                   val shouldSyncServer =
-                          PlayerNotificationService.isUnmeteredNetwork ||
-                                  System.currentTimeMillis() - lastSyncTime >=
-                                          METERED_CONNECTION_SYNC_INTERVAL
+                          timeTracker.shouldSyncServer(
+                                  System.currentTimeMillis(),
+                                  PlayerNotificationService.isUnmeteredNetwork,
+                                  METERED_CONNECTION_SYNC_INTERVAL
+                          )
 
                   val currentTime = playerNotificationService.getCurrentTimeSeconds()
                   if (currentTime > 0) {
@@ -157,7 +171,7 @@ class MediaProgressSyncer(
     if (currentTime > 0) { // Current time should always be > 0 on pause
       sync(true, currentTime) { syncResult ->
         if (currentPlaybackSession !== pausedSession) return@sync cb()
-        lastSyncTime = 0L
+        timeTracker.onPauseOrReset()
         Log.d(tag, "pause: Set last sync time 0 $lastSyncTime")
         failedSyncs = 0
 
@@ -168,7 +182,7 @@ class MediaProgressSyncer(
         cb()
       }
     } else {
-      lastSyncTime = 0L
+      timeTracker.onPauseOrReset()
       Log.d(tag, "pause: Set last sync time 0 $lastSyncTime (current time < 0)")
       failedSyncs = 0
 
@@ -216,6 +230,7 @@ class MediaProgressSyncer(
     currentPlaybackSession?.let {
       it.updatedAt = mediaProgress.lastUpdate
       it.currentTime = mediaProgress.currentTime
+      activePlaybackSession = it.clone()
 
       MediaEventManager.syncEvent(
               mediaProgress,
@@ -225,20 +240,25 @@ class MediaProgressSyncer(
     }
   }
 
+  private fun removeSessionIfNotUpdated(sessionId: String, syncedUpdatedAt: Long) {
+    val stored = DeviceManager.dbManager.getPlaybackSession(sessionId)
+    if (OfflineSessionCleanup.shouldRemoveAfterSingleSync(sessionId, syncedUpdatedAt, stored, currentPlaybackSession)) {
+      DeviceManager.dbManager.removePlaybackSession(sessionId)
+    }
+  }
+
   fun sync(shouldSyncServer: Boolean, currentTime: Double, cb: (SyncResult?) -> Unit) {
     if (lastSyncTime <= 0) {
       Log.e(tag, "Last sync time is not set $lastSyncTime")
       return cb(null)
     }
 
-    val diffSinceLastSync = System.currentTimeMillis() - lastSyncTime
-    if (diffSinceLastSync < 1000L) {
-      return cb(null)
-    }
-    val listeningTimeToAdd = diffSinceLastSync / 1000L
+    val now = System.currentTimeMillis()
+    val tickStep = timeTracker.onTick(now) ?: return cb(null)
 
-    val syncData = MediaProgressSyncData(listeningTimeToAdd, currentPlaybackDuration, currentTime)
-    currentPlaybackSession?.syncData(syncData)
+    val sessionSyncData = MediaProgressSyncData(tickStep.sessionDeltaSeconds, currentPlaybackDuration, currentTime)
+    currentPlaybackSession?.syncData(sessionSyncData)
+    activePlaybackSession = currentPlaybackSession?.clone()
 
     if (currentPlaybackSession?.progress?.isNaN() == true) {
       Log.e(
@@ -251,6 +271,8 @@ class MediaProgressSyncer(
     val hasNetworkConnection = DeviceManager.checkConnectivity(playerNotificationService)
     val syncingSession = currentPlaybackSession
     val syncingSessionId = currentSessionId
+    val syncedUpdatedAt = currentPlaybackSession?.updatedAt ?: now
+    val serverSyncData = MediaProgressSyncData(tickStep.serverPayloadSeconds, currentPlaybackDuration, currentTime)
 
     // Save playback session to db (server linked sessions only)
     //   Sessions are removed once successfully synced with the server
@@ -260,7 +282,6 @@ class MediaProgressSyncer(
       // Save local progress sync
       currentPlaybackSession?.let {
         saveLocalProgress(it)
-        lastSyncTime = System.currentTimeMillis()
 
         Log.d(
                 tag,
@@ -277,23 +298,26 @@ class MediaProgressSyncer(
                         !it.libraryItemId.isNullOrEmpty() &&
                         isConnectedToSameServer
         ) {
-          apiHandler.sendLocalProgressSync(it) { syncSuccess, errorMsg ->
+          val sessionSnapshot = it.clone()
+          apiHandler.sendLocalProgressSync(sessionSnapshot) { syncSuccess, errorMsg ->
+            if (syncSuccess) {
+              timeTracker.onServerSyncComplete(System.currentTimeMillis(), true, tickStep.serverPayloadSeconds, tickStep.generation)
+              removeSessionIfNotUpdated(sessionSnapshot.id, syncedUpdatedAt)
+            }
             if (currentPlaybackSession !== syncingSession) {
-              if (syncSuccess) DeviceManager.dbManager.removePlaybackSession(it.id)
               return@sendLocalProgressSync cb(SyncResult(true, syncSuccess, errorMsg))
             }
             if (syncSuccess) {
               failedSyncs = 0
               playerNotificationService.alertSyncSuccess()
-              DeviceManager.dbManager.removePlaybackSession(it.id) // Remove session from db
-              AbsLogger.info("MediaProgressSyncer", "sync: Successfully synced local progress (title: \"$currentDisplayTitle\") (currentTime: $currentTime) (session id: ${it.id})")
+              AbsLogger.info("MediaProgressSyncer", "sync: Successfully synced local progress (title: \"$currentDisplayTitle\") (currentTime: $currentTime) (session id: ${sessionSnapshot.id})")
             } else {
               failedSyncs++
               if (failedSyncs == 2) {
                 playerNotificationService.alertSyncFailing() // Show alert in client
                 failedSyncs = 0
               }
-              AbsLogger.error("MediaProgressSyncer", "sync: Local progress sync failed (count: $failedSyncs) (title: \"$currentDisplayTitle\") (currentTime: $currentTime) (session id: ${it.id}) (${DeviceManager.serverConnectionConfigName})")
+              AbsLogger.error("MediaProgressSyncer", "sync: Local progress sync failed (count: $failedSyncs) (title: \"$currentDisplayTitle\") (currentTime: $currentTime) (session id: ${sessionSnapshot.id}) (${DeviceManager.serverConnectionConfigName})")
             }
 
             cb(SyncResult(true, syncSuccess, errorMsg))
@@ -306,9 +330,12 @@ class MediaProgressSyncer(
     } else if (hasNetworkConnection && shouldSyncServer) {
       AbsLogger.info("MediaProgressSyncer", "sync: Sending progress sync to server (title: \"$currentDisplayTitle\") (currentTime: $currentTime) (session id: ${currentSessionId}) (${DeviceManager.serverConnectionConfigName})")
 
-      apiHandler.sendProgressSync(syncingSessionId, syncData) { syncSuccess, errorMsg ->
+      apiHandler.sendProgressSync(syncingSessionId, serverSyncData) { syncSuccess, errorMsg ->
+        if (syncSuccess) {
+          timeTracker.onServerSyncComplete(System.currentTimeMillis(), true, tickStep.serverPayloadSeconds, tickStep.generation)
+          removeSessionIfNotUpdated(syncingSessionId, syncedUpdatedAt)
+        }
         if (currentPlaybackSession !== syncingSession) {
-          if (syncSuccess) DeviceManager.dbManager.removePlaybackSession(syncingSessionId)
           return@sendProgressSync cb(SyncResult(true, syncSuccess, errorMsg))
         }
         if (syncSuccess) {
@@ -316,8 +343,6 @@ class MediaProgressSyncer(
 
           failedSyncs = 0
           playerNotificationService.alertSyncSuccess()
-          lastSyncTime = System.currentTimeMillis()
-          DeviceManager.dbManager.removePlaybackSession(syncingSessionId) // Remove only the synced session
         } else {
           failedSyncs++
           if (failedSyncs == 2) {
@@ -377,7 +402,7 @@ class MediaProgressSyncer(
   fun reset() {
     currentPlaybackSession = null
     currentLocalMediaProgress = null
-    lastSyncTime = 0L
+    timeTracker.onPauseOrReset()
     Log.d(tag, "reset: Set last sync time 0 $lastSyncTime")
     failedSyncs = 0
   }

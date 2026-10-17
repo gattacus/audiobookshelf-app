@@ -767,6 +767,14 @@ class MediaManager(private var apiHandler: ApiHandler, var ctx: Context) {
     return mediaProgress
   }
 
+  private suspend fun syncLocalSessionsAndProgress() {
+    suspendCoroutine { cont ->
+      apiHandler.syncLocalSessionsAndProgress { _, _ ->
+        cont.resume(Unit)
+      }
+    }
+  }
+
   // Runs on [androidAutoIOScope] rather than blocking the caller: this is reached from
   // onLoadChildren on the media browser service main thread, and the pings/authorize below
   // are network calls, so runBlocking here caused ANRs while browsing in Android Auto
@@ -823,7 +831,8 @@ class MediaManager(private var apiHandler: ApiHandler, var ctx: Context) {
           serverConfigLastPing = System.currentTimeMillis()
 
           if (lookupMediaProgress) {
-            Log.d(tag, "Has valid conn now get user media progress")
+            Log.d(tag, "Has valid conn now sync local sessions and get user media progress")
+            syncLocalSessionsAndProgress()
             DeviceManager.serverConnectionConfig?.let {
               serverUserMediaProgress = authorize(it)
             }
@@ -843,12 +852,14 @@ class MediaManager(private var apiHandler: ApiHandler, var ctx: Context) {
     }
 
     DeviceManager.serverConnectionConfig?.let { config ->
-      apiHandler.authorize(config) {
-        Log.d(tag, "loadServerUserMediaProgress: Authorized server config ${config.address} result = $it")
-        if (!it.isNullOrEmpty()) {
-          serverUserMediaProgress = it
+      apiHandler.syncLocalSessionsAndProgress { _, _ ->
+        apiHandler.authorize(config) {
+          Log.d(tag, "loadServerUserMediaProgress: Authorized server config ${config.address} result = $it")
+          if (!it.isNullOrEmpty()) {
+            serverUserMediaProgress = it
+          }
+          cb()
         }
-        cb()
       }
     }
   }
