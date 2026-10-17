@@ -16,7 +16,10 @@ function loadComponent(path) {
   assert.deepEqual(compiler.compile(parsed.template.content).errors, [])
   const module = { exports: {} }
   vm.runInNewContext(parsed.script.content.replace(/^import .*$/gm, '').replace('export default ', 'module.exports = '), {
-    module, ...helpers.exports, console: { log() {} }, cellularPermissionHelpers: {}, waitForEpisodePaint: async () => {}, rememberEpisodePage() {}, clearEpisodePage() {}
+    module, ...helpers.exports, console: { log() {}, error() {} }, cellularPermissionHelpers: {}, waitForEpisodePaint: async () => {}, rememberEpisodePage() {}, clearEpisodePage() {},
+    URLSearchParams,
+    window: { innerWidth: 400, outerHeight: 800, addEventListener() {}, removeEventListener() {} },
+    document: { documentElement: { style: { setProperty() {} } } }
   })
   return module.exports
 }
@@ -313,4 +316,144 @@ test('Filename uses server metadata first, falls back to downloaded metadata, an
   assert.deepEqual(ids(view.episodesSorted), ['missing', 'two', 'ten'])
   view.sortDesc = true
   assert.deepEqual(ids(view.episodesSorted), ['ten', 'two', 'missing'])
+})
+
+test('offline fallback podcast page upgrades to full server episode list on reconnect and after episode round trip', async () => {
+  const itemPage = loadComponent('pages/item/_id/index.vue')
+  const localEpisodes = Array.from({ length: 9 }, (_, i) => ({
+    id: `local_ep_${i}`,
+    serverEpisodeId: `ep_${i}`,
+    title: `Episode ${i}`,
+    publishedAt: i + 1
+  }))
+  const serverEpisodes = Array.from({ length: 31 }, (_, i) => ({
+    id: `ep_${i}`,
+    title: `Episode ${i}`,
+    publishedAt: i + 1
+  }))
+  const localItem = {
+    id: 'local_sleep_with_me',
+    libraryItemId: 'sleep_with_me',
+    serverAddress: 'http://nucbox:13378',
+    serverUserId: 'user-1',
+    serverConnectionConfigId: 'cfg-1',
+    mediaType: 'podcast',
+    isLocal: true,
+    media: { metadata: { title: 'Sleep With Me Selection' }, episodes: localEpisodes }
+  }
+  const serverItem = {
+    id: 'sleep_with_me',
+    libraryId: 'lib-1',
+    mediaType: 'podcast',
+    isLocal: false,
+    media: { metadata: { title: 'Sleep With Me Selection' }, episodes: serverEpisodes }
+  }
+
+  const state = Vue.observable({
+    socketConnected: false,
+    networkConnected: false,
+    attemptingConnection: false,
+    playerIsPlaying: false,
+    playerIsStartingPlayback: false,
+    playerStartingPlaybackMediaId: null,
+    isCasting: false,
+    lastItemScrollData: {},
+    libraries: { currentLibraryId: 'lib-1' },
+    user: {
+      serverConnectionConfig: { id: 'cfg-1', address: 'http://nucbox:13378' },
+      user: { id: 'user-1', mediaProgress: [] }
+    },
+    globals: { localMediaProgress: [] }
+  })
+  const store = {
+    state,
+    getters: {
+      'user/getServerAddress': 'http://nucbox:13378',
+      'user/getServerConnectionConfigId': 'cfg-1',
+      'user/getUserCanDownload': true,
+      'user/getIsAdminOrUp': true,
+      'libraries/getBookCoverAspectRatio': 1,
+      'globals/getDownloadItem': () => null
+    },
+    dispatch: async () => {},
+    commit() {}
+  }
+  const db = {
+    getLocalLibraryItem: async (id) => (id === localItem.id ? JSON.parse(JSON.stringify(localItem)) : null),
+    getLocalLibraryItemByLId: async (id) => (id === serverItem.id ? JSON.parse(JSON.stringify(localItem)) : null)
+  }
+  const router = new VueRouter({
+    mode: 'abstract',
+    routes: [
+      { path: '/item/:id/:episode', component: {} },
+      { path: '/item/:id', component: {} }
+    ]
+  })
+
+  // 1. Offline fallback route (?noredirect=1) loads 9 local episodes and strips noredirect into localfallback=1
+  await router.push('/item/local_sleep_with_me?noredirect=1')
+  const redirects = []
+  const asyncData1 = await itemPage.asyncData({
+    store,
+    params: { id: 'local_sleep_with_me' },
+    query: router.currentRoute.query,
+    redirect: (url) => redirects.push(url),
+    app: { $db: db }
+  })
+  assert.deepEqual(redirects, [])
+  assert.equal(asyncData1.libraryItem.id, 'local_sleep_with_me')
+
+  global.window = { innerWidth: 400, outerHeight: 800, addEventListener() {}, removeEventListener() {} }
+  global.document = { documentElement: { style: { setProperty() {} } } }
+  const ctx = {
+    ...itemPage.data(),
+    ...asyncData1,
+    $refs: {},
+    $platform: 'android',
+    $store: store,
+    $router: router,
+    $db: db,
+    $localStore: { setLastLibraryId() {} },
+    $eventBus: { $on() {}, $off() {} },
+    $socket: { $on() {}, $off() {} },
+    $nativeHttp: {
+      get: async (url) => {
+        assert.equal(url, '/api/items/sleep_with_me?expanded=1&include=rssfeed')
+        return JSON.parse(JSON.stringify(serverItem))
+      }
+    }
+  }
+  Object.defineProperty(ctx, '$route', { get: () => router.currentRoute })
+  for (const [key, getter] of Object.entries(itemPage.computed)) {
+    Object.defineProperty(ctx, key, { get: () => getter.call(ctx) })
+  }
+  for (const [key, method] of Object.entries(itemPage.methods)) {
+    ctx[key] = method.bind(ctx)
+  }
+
+  await itemPage.mounted.call(ctx)
+  assert.equal(ctx.episodes.length, 9)
+  assert.equal(router.currentRoute.query.noredirect, undefined, 'noredirect must be consumed so back navigation is not poisoned')
+  assert.equal(router.currentRoute.query.localfallback, '1')
+
+  // 2. If user navigates to an episode and presses Back after socket reconnects, asyncData redirects to server item WITHOUT forcing episodefilter=downloaded
+  state.socketConnected = true
+  const backRedirects = []
+  await itemPage.asyncData({
+    store,
+    params: { id: 'local_sleep_with_me' },
+    query: router.currentRoute.query,
+    redirect: (url) => backRedirects.push(url),
+    app: { $db: db }
+  })
+  assert.deepEqual(backRedirects, ['/item/sleep_with_me?localLibraryItemId=local_sleep_with_me'])
+
+  // 3. If user stays on the local fallback page when socketConnected becomes true, it upgrades in-place to all 31 server episodes
+  await itemPage.watch.socketConnected.call(ctx, true)
+  assert.equal(ctx.isLocal, false)
+  assert.equal(ctx.libraryItemId, 'sleep_with_me')
+  assert.equal(ctx.episodes.length, 31)
+  assert.equal(ctx.localLibraryItemEpisodes.length, 9)
+  assert.equal(router.currentRoute.path, '/item/sleep_with_me')
+  assert.equal(router.currentRoute.query.episodefilter, undefined)
 })

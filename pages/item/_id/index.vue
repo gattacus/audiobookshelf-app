@@ -195,7 +195,7 @@ export default {
       } else if (query.noredirect !== '1' && libraryItem?.libraryItemId && libraryItem?.serverAddress === store.getters['user/getServerAddress'] && store.state.socketConnected) {
         const queryParams = new URLSearchParams()
         queryParams.set('localLibraryItemId', libraryItemId)
-        if (libraryItem.mediaType === 'podcast') {
+        if (libraryItem.mediaType === 'podcast' && query.localfallback !== '1') {
           // Filter by downloaded when redirecting from the local copy
           queryParams.set('episodefilter', 'downloaded')
         }
@@ -225,11 +225,22 @@ export default {
       episodeStartingPlayback: null,
       continuousPodcastPlayback: false,
       podcastPlaybackReady: false,
-      startingDownload: false
+      startingDownload: false,
+      upgradingToServerItem: false
     }
   },
   mixins: [cellularPermissionHelpers],
+  watch: {
+    socketConnected(newVal) {
+      if (newVal && this.libraryItem?.isLocal && this.serverLibraryItemId) {
+        return this.upgradeLocalToServerLibraryItem()
+      }
+    }
+  },
   computed: {
+    socketConnected() {
+      return this.$store.state.socketConnected
+    },
     isIos() {
       return this.$platform === 'ios'
     },
@@ -781,13 +792,45 @@ export default {
         this.$toast.error('Failed to get library item from server')
         return this.$router.replace('/bookshelf')
       }
+    },
+    async upgradeLocalToServerLibraryItem() {
+      if (this.upgradingToServerItem || !this.libraryItem?.isLocal || !this.serverLibraryItemId) return
+      this.upgradingToServerItem = true
+      const serverId = this.serverLibraryItemId
+      const localItem = this.localLibraryItem
+      const configId = this.currentServerConnectionConfigId
+      try {
+        console.log(`Upgrading local library item "${this.libraryItemId}" to server item "${serverId}"`)
+        const serverItem = await this.$nativeHttp.get(`/api/items/${serverId}?expanded=1&include=rssfeed`, { connectTimeout: 5000 }).catch((error) => {
+          console.error('Failed to upgrade local item to server item', error)
+          return null
+        })
+        if (!serverItem || this._isDestroyed || this.libraryItem !== localItem || this.currentServerConnectionConfigId !== configId || this.serverLibraryItemId !== serverId) return
+        serverItem.localLibraryItem = localItem
+        this.libraryItem = serverItem
+        this.libraryItemId = serverItem.id
+        const query = { ...this.$route.query, localLibraryItemId: localItem.id }
+        delete query.noredirect
+        delete query.localfallback
+        await this.$router.replace({ path: `/item/${serverItem.id}`, query, hash: this.$route.hash })
+      } finally {
+        this.upgradingToServerItem = false
+      }
     }
   },
   async mounted() {
     if (!this.libraryItem) {
       await this.loadServerLibraryItem()
+    } else if (this.isLocal && (this.$route.query.noredirect === '1' || this.$route.query.localfallback !== '1')) {
+      const query = { ...this.$route.query, localfallback: '1' }
+      delete query.noredirect
+      await this.$router.replace({ path: this.$route.path, query, hash: this.$route.hash })
     }
     this.init()
+    // The socket may reconnect before this fallback page is created, so its watcher never fires.
+    if (this.socketConnected && this.libraryItem?.isLocal) {
+      await this.upgradeLocalToServerLibraryItem()
+    }
   },
   beforeDestroy() {
     window.removeEventListener('resize', this.windowResized)
