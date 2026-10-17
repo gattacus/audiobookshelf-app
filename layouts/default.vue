@@ -51,9 +51,10 @@ export default {
           console.log(`[default] network connected changed ${oldVal} -> ${newVal}`)
           if (!this.user) {
             this.attemptConnection()
-          } else if (!this.currentLibraryId) {
-            this.initLibraries()
           } else {
+            if (!this.currentLibraryId) {
+              this.initLibraries()
+            }
             var timeSinceDisconnect = Date.now() - this.disconnectTime
             if (timeSinceDisconnect > 5000) {
               console.log('[default] Time since disconnect was', timeSinceDisconnect, 'sync with server')
@@ -249,6 +250,7 @@ export default {
 
         AbsLogger.info({ tag: 'default', message: `attemptConnection: Successful connection to last saved server config (${serverConnectionConfig.name})` })
         await this.initLibraries()
+        await this.syncLocalSessions(true)
       } finally {
         this.attemptingConnection = false
         this.$store.commit('setConnectionAttemptIsBackground', false)
@@ -416,12 +418,11 @@ export default {
       if (this.$store.state.user.serverConnectionConfig) {
         AbsLogger.info({ tag: 'default', message: `mounted: Server connected, init libraries (${this.$store.getters['user/getServerConfigName']})` })
         await this.initLibraries()
+        await this.syncLocalSessions(true)
       } else {
         AbsLogger.info({ tag: 'default', message: `mounted: Server not connected, attempt connection` })
         await this.attemptConnection()
       }
-
-      await this.syncLocalSessions(true)
 
       this.hasMounted = true
 

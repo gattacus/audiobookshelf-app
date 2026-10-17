@@ -8,7 +8,7 @@ const Vue = require('vue')
 const source = compiler.parseComponent(fs.readFileSync('layouts/default.vue', 'utf8'))
 assert.deepEqual(compiler.compile(source.template.content).errors, [])
 function context(platform = 'android') {
-  const timers = new Map(), requests = [], connections = []
+  const timers = new Map(), requests = [], connections = [], sessionSyncs = []
   let nextTimer = 0
   const module = { exports: {} }
   vm.runInNewContext(source.script.content.replace(/^import .*$/gm, '').replace('export default ', 'module.exports = '), {
@@ -21,7 +21,11 @@ function context(platform = 'android') {
   const config = { id: 'saved', name: 'Test server', address: 'https://example.invalid', token: 'test-token' }
   const ctx = {
     ...layout.data(), $platform: platform, hasMounted: true, networkConnected: true, user: null, attemptingConnection: false,
-    $db: { getDeviceData: async () => ({ lastServerConnectionConfigId: config.id, serverConnectionConfigs: [config] }), setServerConnectionConfig: async (value) => value },
+    $db: {
+      getDeviceData: async () => ({ lastServerConnectionConfigId: config.id, serverConnectionConfigs: [config] }),
+      setServerConnectionConfig: async (value) => value,
+      syncLocalSessionsWithServer: async (isFirstSync) => { sessionSyncs.push(isFirstSync); return {} }
+    },
     $store: { state: { connectionAttemptIsBackground: false }, getters: {}, commit(type, value) { if (type === 'user/setUser') ctx.user = value; if (type === 'setConnectionAttemptIsBackground') ctx.$store.state.connectionAttemptIsBackground = value }, dispatch: async () => {} },
     $nativeHttp: { post: async (url, data, options) => { requests.push(options); throw new Error('Network not ready') } },
     $localStore: { getLastLibraryId: async () => null }, $isValidVersion: () => false,
@@ -31,7 +35,7 @@ function context(platform = 'android') {
   for (const [name, fn] of Object.entries(layout.methods)) ctx[name] = fn.bind(ctx)
   ctx.initLibraries = async () => {}
   const success = () => ({ user: { id: 'user', librariesAccessible: [] }, serverSettings: { version: '2.25.0' }, userDefaultLibraryId: 'library' })
-  return { ctx, layout, timers, requests, connections, success, async tick() {
+  return { ctx, layout, timers, requests, connections, sessionSyncs, success, async tick() {
     assert.equal(timers.size, 1)
     const [id, timer] = timers.entries().next().value; timers.delete(id)
     await timer.fn()
@@ -201,4 +205,24 @@ test('iOS foreground and network restoration do not enable Android socket recove
   app.ctx.$socket.recover = () => assert.fail('Android-only recovery')
   app.layout.watch.networkConnected.handler.call(app.ctx, true, false)
   await app.ctx.visibilityChanged()
+})
+
+test('deferred connection recovery and network restoration sync queued local sessions', async () => {
+  const app = context(); const { ctx } = app
+  let calls = 0
+  ctx.$nativeHttp.post = async () => { if (++calls === 1) throw new Error('Server unreachable at launch'); return app.success() }
+  await ctx.attemptConnection()
+  await ctx.syncLocalSessions(true)
+  assert.deepEqual(app.sessionSyncs, [])
+
+  // Retry succeeds later after startup -> must sync queued local sessions
+  await app.tick()
+  assert.deepEqual(app.sessionSyncs, [true])
+
+  // Network reconnects after >5s while user is set even if currentLibraryId was not yet loaded
+  ctx.currentLibraryId = null
+  ctx.disconnectTime = Date.now() - 6000
+  app.layout.watch.networkConnected.handler.call(ctx, true, false)
+  assert.equal(await app.tick(), 4000)
+  assert.deepEqual(app.sessionSyncs, [true, false])
 })
