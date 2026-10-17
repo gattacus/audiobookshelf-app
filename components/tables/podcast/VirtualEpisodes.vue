@@ -9,15 +9,17 @@
 </template>
 
 <script>
-import { episodeIndexAt, episodeWindow } from '@/utils/episodeList'
+import { episodeIndexAt, episodeWindow, getEpisodeLayout, rememberEpisodeLayout } from '@/utils/episodeList'
 
 export default {
   props: {
     episodes: { type: Array, default: () => [] },
+    itemId: String,
     resetKey: String
   },
   data() {
-    return { rowHeights: {}, viewportTop: 0, viewportHeight: 800 }
+    const layout = this.$store && this.itemId ? getEpisodeLayout(this.$store, this.itemId) : null
+    return { rowHeights: layout?.heights || {}, measuredWidth: layout?.width || 0, viewportTop: 0, viewportHeight: 800 }
   },
   computed: {
     offsets() {
@@ -66,7 +68,14 @@ export default {
       const anchor = episodeIndexAt(this.offsets, this.viewportTop)
       let adjustment = 0
       for (const entry of entries) {
-        if (entry.target === this.scrollRoot) { this.scheduleViewport(); continue }
+        if (entry.target === this.scrollRoot) {
+          if (this.measuredWidth !== this.scrollRoot.clientWidth) {
+            this.measuredWidth = this.scrollRoot.clientWidth
+            this.rowHeights = {}
+          }
+          this.scheduleViewport()
+          continue
+        }
         const index = Number(entry.target.dataset.index)
         const episode = this.episodes[index]
         if (!episode) continue
@@ -86,6 +95,8 @@ export default {
     while (parent && !/auto|scroll/.test(getComputedStyle(parent).overflowY)) parent = parent.parentElement
     this.scrollRoot = parent
     if (!parent) return
+    if (this.measuredWidth && this.measuredWidth !== parent.clientWidth) this.rowHeights = {}
+    this.measuredWidth = parent.clientWidth
     this.resizeObserver = new ResizeObserver(this.measureRows)
     parent.addEventListener('scroll', this.scheduleViewport, { passive: true })
     window.addEventListener('resize', this.scheduleViewport)
@@ -96,6 +107,7 @@ export default {
     this.observeRows()
   },
   beforeDestroy() {
+    if (this.$store && this.itemId && this.scrollRoot) rememberEpisodeLayout(this.$store, this.itemId, this.measuredWidth, this.rowHeights)
     if (this.frame) cancelAnimationFrame(this.frame)
     this.resizeObserver?.disconnect()
     this.scrollRoot?.removeEventListener('scroll', this.scheduleViewport)

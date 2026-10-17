@@ -13,7 +13,8 @@ function source(path, names, bindings = {}) {
   vm.runInNewContext(code + `\nmodule.exports = { ${names} };`, { module, ...bindings })
   return module.exports
 }
-const list = source('utils/episodeList.js', 'episodeIndexAt, episodeWindow')
+const list = source('utils/episodeList.js', 'episodeIndexAt, episodeWindow, getEpisodeLayout, rememberEpisodeLayout')
+const podcast = source('utils/podcastEpisode.js', 'episodeFilename')
 let now = 1000
 const navigation = source('utils/episodeNavigation.js', 'rememberEpisodePage, takeEpisodePage, clearEpisodePage', { Date: { now: () => now } })
 function component(path, bindings = {}) {
@@ -21,7 +22,7 @@ function component(path, bindings = {}) {
   assert.deepEqual(compiler.compile(parsed.template.content).errors, [])
   const module = { exports: {} }
   vm.runInNewContext(parsed.script.content.replace(/^import .*$/gm, '').replace('export default ', 'module.exports = '), {
-    module, console: { log() {}, error() {} }, cellularPermissionHelpers: {}, ...list, ...navigation, ...bindings
+    module, console: { log() {}, error() {} }, cellularPermissionHelpers: {}, ...list, ...podcast, ...navigation, ...bindings
   })
   return { ...module.exports, ...compiler.compileToFunctions(parsed.template.content) }
 }
@@ -34,6 +35,22 @@ const newStore = () => ({ state: { user: { serverConnectionConfig: { id: 'server
   'user/getUserSetting': key => ({ podcastEpisodesFilterBy: 'all', podcastEpisodesOrderBy: 'title', podcastEpisodesOrderDesc: false })[key],
   'user/getUserMediaProgress': () => { throw new Error('Show All must not scan progress per episode') }
 } })
+
+test('list remount restores measured offsets before rendering and does not reuse another account or podcast layout', () => {
+  const store = newStore()
+  const first = new Vue({ ...virtual, propsData: { itemId: 'podcast', episodes }, beforeCreate() { this.$store = store } })
+  first.$set(first.rowHeights, 'episode-0', 300)
+  first.$set(first.rowHeights, 'episode-600', 90)
+  list.rememberEpisodeLayout(store, 'podcast', 360, first.rowHeights)
+  const reopened = new Vue({ ...virtual, propsData: { itemId: 'podcast', episodes }, beforeCreate() { this.$store = store } })
+  assert.equal(reopened.offsets.at(-1), first.offsets.at(-1))
+  assert.equal(reopened.measuredWidth, 360)
+  reopened.$set(reopened.rowHeights, 'episode-0', 320)
+  assert.equal(first.rowHeights['episode-0'], 300, 'restored measurements must be copied')
+  assert.equal(list.getEpisodeLayout(store, 'other-podcast'), null)
+  store.state.user.user.id = 'other-user'
+  assert.equal(list.getEpisodeLayout(store, 'podcast'), null)
+})
 
 test('virtual windows cover empty, first, middle, and last rows without mounting the whole list', () => {
   const offsets = [0]
@@ -167,3 +184,39 @@ test('episode tap paints loading before navigation, ignores double taps, and cle
   await destroyed
   assert.equal(pushes, 1)
 })
+
+for (const platform of ['android', 'ios']) {
+  test(`${platform}: filter counts and rendered rows agree across the virtualization threshold`, async () => {
+    const store = newStore()
+    const settings = Vue.observable({ podcastEpisodesFilterBy: 'all', podcastEpisodesOrderBy: 'title', podcastEpisodesOrderDesc: false })
+    Vue.observable(store.state)
+    store.getters['user/getUserSetting'] = key => settings[key]
+    store.dispatch = (_action, payload) => Object.assign(settings, payload)
+    store.state.user.user.mediaProgress = episodes.slice(0, 3).map(e => ({ libraryItemId: 'podcast', episodeId: e.id, isFinished: true }))
+    store.getters['user/getUserMediaProgress'] = (id, episode) => store.state.user.user.mediaProgress.find(p => p.libraryItemId === id && p.episodeId === episode)
+    const row = { props: ['episode'], render(h) { return h('p', { attrs: { 'data-episode-row': this.episode.id } }, this.episode.title) } }
+    const view = new Vue({ ...table, propsData: { libraryItem: item, episodes, localEpisodes: [] },
+      components: { 'tables-podcast-virtual-episodes': virtual, 'tables-podcast-episode-row': row },
+      beforeCreate() { this.$platform = platform; this.$strings = strings; this.$store = store }
+    })
+    for (const count of [0, 3, 100, 101, 1200, 101, 100, 3, 0]) {
+      view.localEpisodes = episodes.slice(0, count).map(e => ({ id: `local-${e.id}`, serverEpisodeId: e.id }))
+      for (const filter of ['all', 'downloaded', 'complete', 'inProgress', 'incomplete', 'downloaded', 'all']) {
+        view.setFilter(filter)
+        await Vue.nextTick()
+        const expected = filter === 'all' ? 1200 : filter === 'downloaded' ? count : filter === 'complete' ? 3 : filter === 'inProgress' ? 0 : 1197
+        assert.equal(view.episodesSorted.length, expected)
+        const html = await renderer.renderToString(view)
+        const rows = (html.match(/data-episode-row=/g) || []).length
+        assert.match(html, new RegExp(`Episodes \\(${expected}\\)`))
+        if (platform === 'android' && expected > 100) {
+          assert.ok(rows > 0 && rows < 20)
+          assert.match(html, new RegExp(`aria-setsize="${expected}"`))
+        } else {
+          assert.equal(rows, expected)
+          assert.doesNotMatch(html, /aria-setsize/)
+        }
+      }
+    }
+  })
+}

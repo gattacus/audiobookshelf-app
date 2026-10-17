@@ -1,249 +1,128 @@
 import { CapacitorHttp } from '@capacitor/core'
+import { AbsLogger } from '@/plugins/capacitor/AbsLogger'
 
-export default function ({ store, $db, $socket }, inject) {
+export default function ({ store, $db }, inject) {
+  // Axios, socket recovery and native HTTP share one refresh per current session.
+  const refreshes = new Map()
+  const saves = new Set()
+  let revision = 0
+  const snapshot = () => JSON.stringify([revision, store.state.user.serverConnectionConfig?.id, store.state.user.user?.id, store.state.user.accessToken])
+  const httpError = response => Object.assign(new Error(typeof response.data === 'string' ? response.data : `HTTP ${response.status}`), { status: response.status })
+  const sessionChanged = () => Object.assign(new Error('Session changed during token refresh'), { sessionChanged: true })
+
   const nativeHttp = {
     async request(method, _url, data, options = {}) {
-      // When authorizing before a config is set, server config gets passed in as an option
-      let serverConnectionConfig = options.serverConnectionConfig || store.state.user.serverConnectionConfig
-      delete options.serverConnectionConfig
-
+      const { serverConnectionConfig = store.state.user.serverConnectionConfig, headers: extraHeaders, ...requestOptions } = options
       let url = _url
       let headers = {}
       if (!url.startsWith('http') && !url.startsWith('capacitor')) {
-        const bearerToken = store.getters['user/getToken']
-        if (bearerToken) {
-          headers['Authorization'] = `Bearer ${bearerToken}`
-        } else {
-          console.warn('[nativeHttp] No Bearer Token for request')
-        }
-        if (serverConnectionConfig?.address) {
-          url = `${serverConnectionConfig.address}${url}`
-        }
+        const token = store.getters['user/getToken']
+        if (token) headers.Authorization = `Bearer ${token}`
+        if (serverConnectionConfig?.address) url = `${serverConnectionConfig.address}${url}`
       }
-      if (data) {
-        headers['Content-Type'] = 'application/json'
+      if (data) headers['Content-Type'] = 'application/json'
+      headers = { ...headers, ...extraHeaders }
+      const response = await CapacitorHttp.request({ method, url, data, headers, ...requestOptions })
+      // Login/refresh rejection must not recursively refresh or erase another session.
+      if (response.status === 401 && serverConnectionConfig?.address && url.startsWith(serverConnectionConfig.address + '/') && !/\/(login|auth\/refresh)(?:\?|$)/.test(url)) {
+        return this.handleTokenRefresh(method, url, data, headers, requestOptions, serverConnectionConfig)
       }
-      if (options.headers) {
-        headers = { ...headers, ...options.headers }
-        delete options.headers
-      }
-      console.log(`[nativeHttp] Making ${method} request to ${url}`)
+      if (response.status >= 400) throw httpError(response)
+      return response.data
+    },
 
-      return CapacitorHttp.request({
-        method,
-        url,
-        data,
-        headers,
-        ...options
-      }).then((res) => {
-        if (res.status === 401) {
-          console.error(`[nativeHttp] 401 status for url "${url}"`)
-          // Handle refresh token automatically
-          return this.handleTokenRefresh(method, url, data, headers, options, serverConnectionConfig)
-        }
-        if (res.status >= 400) {
-          console.error(`[nativeHttp] ${res.status} status for url "${url}"`)
-          const message = typeof res.data === 'string' ? res.data : `HTTP ${res.status}`
-          const error = new Error(message)
-          error.status = res.status
+    async handleTokenRefresh(method, url, data, headers, options, config) {
+      const current = store.state.user.serverConnectionConfig
+      // A late 401 may belong to the token that another request has already renewed.
+      const currentToken = current?.id === config?.id && store.getters['user/getToken']
+      const token = currentToken && headers.Authorization !== `Bearer ${currentToken}`
+        ? currentToken : await this.refreshSession(config)
+      const response = await CapacitorHttp.request({ method, url, data,
+        headers: { ...headers, Authorization: `Bearer ${token}` }, ...options })
+      // An API retry failure is not rejection of the refresh credential.
+      if (response.status >= 400) throw httpError(response)
+      return response.data
+    },
+
+    refreshSession(config = store.state.user.serverConnectionConfig) {
+      const before = snapshot()
+      const key = JSON.stringify([config?.id, before])
+      if (refreshes.has(key)) return refreshes.get(key)
+      const pending = (async () => {
+        if (!config?.id || !config.address) throw new Error('No server connection available')
+        if (store.state.user.serverConnectionConfig && store.state.user.serverConnectionConfig.id !== config.id) throw sessionChanged()
+        const refreshToken = await $db.getRefreshToken(config.id)
+        if (before !== snapshot()) throw sessionChanged()
+        if (!refreshToken) {
+          const error = Object.assign(new Error('No refresh credential available; sign in again'), { status: 401 })
+          await this.handleRefreshFailure(config.id, before, false)
           throw error
         }
-        return res.data
-      })
+        let tokens
+        try {
+          tokens = await this.refreshAccessToken(refreshToken, config.address, config.customHeaders)
+        } catch (error) {
+          // A native refresh, manual login, logout or account switch may have superseded this request.
+          if (before !== snapshot() || refreshToken !== await $db.getRefreshToken(config.id)) throw sessionChanged()
+          AbsLogger.info({ tag: 'auth', message: `Refresh failed (${error.status || 'transport'}); ${error.refreshRejected ? 'credential rejected' : 'credentials preserved'}` }).catch(() => {})
+          if (error.refreshRejected) await this.handleRefreshFailure(config.id, before, true)
+          throw error
+        }
+        if (before !== snapshot() || refreshToken !== await $db.getRefreshToken(config.id)) throw sessionChanged()
+        tokens.refreshToken = tokens.refreshToken || refreshToken
+        await this.updateTokens(tokens, config, before)
+        return tokens.accessToken
+      })().finally(() => { if (refreshes.get(key) === pending) refreshes.delete(key) })
+      refreshes.set(key, pending)
+      return pending
     },
 
-    /**
-     * Handles token refresh when a 401 Unauthorized response is received
-     * @param {string} method - HTTP method
-     * @param {string} url - Full URL
-     * @param {*} data - Request data
-     * @param {Object} headers - Request headers
-     * @param {Object} options - Additional options
-     * @param {{ id: string, address: string, version: string }} serverConnectionConfig
-     * @returns {Promise} - Promise that resolves with the response data
-     */
-    async handleTokenRefresh(method, url, data, headers, options, serverConnectionConfig) {
-      try {
-        console.log('[nativeHttp] Attempting to refresh token...')
-
-        if (!serverConnectionConfig?.id) {
-          console.error('[nativeHttp] No server connection config ID available for token refresh')
-          throw new Error('No server connection available')
-        }
-
-        // Get refresh token from secure storage
-        const refreshToken = await $db.getRefreshToken(serverConnectionConfig.id)
-        if (!refreshToken) {
-          console.error('[nativeHttp] No refresh token available')
-          throw new Error('No refresh token available')
-        }
-
-        // Attempt to refresh the token
-        const newTokens = await this.refreshAccessToken(refreshToken, serverConnectionConfig.address)
-        if (!newTokens?.accessToken) {
-          console.error('[nativeHttp] Failed to refresh access token')
-          throw new Error('Failed to refresh access token')
-        }
-
-        // Update the store with new tokens
-        await this.updateTokens(newTokens, serverConnectionConfig)
-
-        // Retry the original request with the new token
-        console.log('[nativeHttp] Retrying original request with new token...')
-        const retryResponse = await CapacitorHttp.request({
-          method,
-          url,
-          data,
-          headers: {
-            ...headers,
-            Authorization: `Bearer ${newTokens.accessToken}`
-          },
-          ...options
-        })
-
-        if (retryResponse.status >= 400) {
-          console.error(`[nativeHttp] Retry request failed with status ${retryResponse.status}`)
-          const message = typeof retryResponse.data === 'string' ? retryResponse.data : `HTTP ${retryResponse.status}`
-          throw new Error(message)
-        }
-
-        return retryResponse.data
-      } catch (error) {
-        console.error('[nativeHttp] Token refresh failed:', error)
-
-        // If refresh fails, redirect to login
-        await this.handleRefreshFailure(serverConnectionConfig?.id)
+    async refreshAccessToken(refreshToken, serverAddress, customHeaders = {}) {
+      const response = await CapacitorHttp.post({ url: `${serverAddress}/auth/refresh`,
+        headers: { ...customHeaders, 'Content-Type': 'application/json', 'x-refresh-token': refreshToken },
+        data: {}, connectTimeout: 6000, readTimeout: 6000 })
+      if (response.status !== 200) {
+        const error = httpError(response)
+        error.refreshRejected = response.status === 401 || response.status === 403
         throw error
       }
+      if (!response.data?.user?.accessToken) throw new Error('Refresh response has no access token')
+      return { accessToken: response.data.user.accessToken, refreshToken: response.data.user.refreshToken }
     },
 
-    /**
-     * Refreshes the access token using the refresh token
-     * @param {string} refreshToken - The refresh token
-     * @param {string} serverAddress - The server address
-     * @returns {Promise<Object|null>} - Promise that resolves with new tokens or null
-     */
-    async refreshAccessToken(refreshToken, serverAddress) {
-      try {
-        if (!serverAddress) {
-          throw new Error('No server address available')
-        }
+    async updateTokens(tokens, config, before = snapshot()) {
+      if (before !== snapshot()) throw sessionChanged()
+      const save = $db.setServerConnectionConfig({ ...config, token: tokens.accessToken, refreshToken: tokens.refreshToken })
+      saves.add(save)
+      let savedConfig
+      try { savedConfig = await save } finally { saves.delete(save) }
+      if (before !== snapshot()) throw sessionChanged()
+      if (!savedConfig) throw new Error('Could not save refreshed session')
+      store.commit('user/setAccessToken', tokens.accessToken)
+      store.commit('user/setServerConnectionConfig', savedConfig)
+    },
 
-        console.log('[nativeHttp] Refreshing access token...')
+    async cancelRefresh() {
+      revision++
+      // Let a storage write already in progress finish before logout clears the selected server.
+      await Promise.allSettled([...saves])
+    },
 
-        const response = await CapacitorHttp.post({
-          url: `${serverAddress}/auth/refresh`,
-          headers: {
-            'Content-Type': 'application/json',
-            'x-refresh-token': refreshToken
-          },
-          data: {}
-        })
-
-        if (response.status !== 200) {
-          console.error('[nativeHttp] Token refresh request failed:', response.status)
-          return null
-        }
-
-        const userResponseData = response.data
-        if (!userResponseData.user?.accessToken) {
-          console.error('[nativeHttp] No access token in refresh response')
-          return null
-        }
-
-        console.log('[nativeHttp] Successfully refreshed access token')
-        return {
-          accessToken: userResponseData.user.accessToken,
-          // Refresh token gets returned when refresh token is sent in x-refresh-token header
-          refreshToken: userResponseData.user.refreshToken
-        }
-      } catch (error) {
-        console.error('[nativeHttp] Failed to refresh access token:', error)
-        return null
+    async handleRefreshFailure(configId, before, clearToken) {
+      if (before !== snapshot()) return
+      if (clearToken) await $db.clearRefreshToken(configId)
+      if (before !== snapshot()) return
+      await store.dispatch('user/logout')
+      if (store.state.user.serverConnectionConfig || store.state.user.user) return
+      if (window.location.pathname !== '/connect') {
+        window.location.href = '/connect?error=refreshTokenFailed&serverConnectionConfigId=' + encodeURIComponent(configId)
       }
     },
 
-    /**
-     * Updates the store and secure storage with new tokens
-     * @param {Object} tokens - Object containing accessToken and refreshToken
-     * @param {{ id: string, address: string, version: string }} serverConnectionConfig
-     * @returns {Promise} - Promise that resolves when tokens are updated
-     */
-    async updateTokens(tokens, serverConnectionConfig) {
-      try {
-        if (!serverConnectionConfig?.id) {
-          throw new Error('No server connection config ID available')
-        }
-
-        // Update the config with new tokens
-        const updatedConfig = {
-          ...serverConnectionConfig,
-          token: tokens.accessToken,
-          refreshToken: tokens.refreshToken
-        }
-
-        // Save updated config to secure storage, persists refresh token in secure storage
-        const savedConfig = await $db.setServerConnectionConfig(updatedConfig)
-
-        // Update the store
-        store.commit('user/setAccessToken', tokens.accessToken)
-
-        // Re-authenticate socket if necessary
-        if ($socket?.connected && !$socket.isAuthenticated) {
-          $socket.sendAuthenticate()
-        } else if (!$socket) {
-          console.warn('[nativeHttp] Socket not available, cannot re-authenticate')
-        }
-
-        if (savedConfig) {
-          store.commit('user/setServerConnectionConfig', savedConfig)
-        }
-
-        console.log('[nativeHttp] Successfully updated tokens in store and secure storage')
-      } catch (error) {
-        console.error('[nativeHttp] Failed to update tokens:', error)
-        throw error
-      }
-    },
-
-    /**
-     * Handles the case when token refresh fails
-     * @param {string} [serverConnectionConfigId]
-     * @returns {Promise} - Promise that resolves when logout is complete
-     */
-    async handleRefreshFailure(serverConnectionConfigId) {
-      try {
-        console.log('[nativeHttp] Handling refresh failure - logging out user')
-
-        // Clear store
-        await store.dispatch('user/logout')
-
-        if (serverConnectionConfigId) {
-          // Clear refresh token for server connection config
-          await $db.clearRefreshToken(serverConnectionConfigId)
-        }
-
-        // Redirect to login page
-        if (window.location.pathname !== '/connect') {
-          window.location.href = '/connect?error=refreshTokenFailed&serverConnectionConfigId=' + serverConnectionConfigId
-        }
-      } catch (error) {
-        console.error('[nativeHttp] Failed to handle refresh failure:', error)
-      }
-    },
-
-    get(url, options = {}) {
-      return this.request('GET', url, undefined, options)
-    },
-    post(url, data, options = {}) {
-      return this.request('POST', url, data, options)
-    },
-    patch(url, data, options = {}) {
-      return this.request('PATCH', url, data, options)
-    },
-    delete(url, options = {}) {
-      return this.request('DELETE', url, undefined, options)
-    }
+    get(url, options = {}) { return this.request('GET', url, undefined, options) },
+    post(url, data, options = {}) { return this.request('POST', url, data, options) },
+    patch(url, data, options = {}) { return this.request('PATCH', url, data, options) },
+    delete(url, options = {}) { return this.request('DELETE', url, undefined, options) }
   }
   inject('nativeHttp', nativeHttp)
 }

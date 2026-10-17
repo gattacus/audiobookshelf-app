@@ -129,6 +129,7 @@ export default ({ app, store }, inject) => {
   // Listen for token refresh events from native app
   AbsDatabase.addListener('onTokenRefresh', (data) => {
     store.commit('user/setAccessToken', data.accessToken)
+    if (app.$socket?.connected && !app.$socket.isAuthenticated) app.$socket.sendAuthenticate()
   })
 
   // Listen for token refresh failure events from native app

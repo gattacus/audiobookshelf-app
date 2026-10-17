@@ -8,12 +8,15 @@ const compiler = require('vue-template-compiler')
 
 Vue.use(VueRouter)
 
+const helpers = { exports: {} }
+vm.runInNewContext(fs.readFileSync('utils/podcastEpisode.js', 'utf8').replace('export function ', 'function ') + '\nmodule.exports = { episodeFilename }', { module: helpers })
+
 function loadComponent(path) {
   const parsed = compiler.parseComponent(fs.readFileSync(path, 'utf8'))
   assert.deepEqual(compiler.compile(parsed.template.content).errors, [])
   const module = { exports: {} }
   vm.runInNewContext(parsed.script.content.replace(/^import .*$/gm, '').replace('export default ', 'module.exports = '), {
-    module, console: { log() {} }, cellularPermissionHelpers: {}, waitForEpisodePaint: async () => {}, rememberEpisodePage() {}, clearEpisodePage() {}
+    module, ...helpers.exports, console: { log() {} }, cellularPermissionHelpers: {}, waitForEpisodePaint: async () => {}, rememberEpisodePage() {}, clearEpisodePage() {}
   })
   return module.exports
 }
@@ -125,4 +128,189 @@ test('a fresh Downloads entry still selects Downloaded after a previous Show All
   const reopened = await app.mount()
   assert.equal(reopened.filterKey, 'downloaded')
   assert.equal(app.router.currentRoute.query.episodefilter, undefined)
+})
+
+// Use actual Vue reactivity and row rendering, rather than a hand-built computed context.
+const strings = require('../strings/en-us.json')
+const renderer = require('vue-server-renderer').createRenderer()
+function renderedComponent(path) {
+  const parsed = compiler.parseComponent(fs.readFileSync(path, 'utf8'))
+  return { ...loadComponent(path), ...compiler.compileToFunctions(parsed.template.content) }
+}
+const renderedRow = renderedComponent('components/tables/podcast/EpisodeRow.vue')
+const renderedTable = renderedComponent('components/tables/podcast/EpisodesTable.vue')
+
+function reactiveTable({ platform = 'android', local = false, count = 3, filter = 'all', order = 'title' } = {}) {
+  const episodes = Array.from({ length: count }, (_, n) => ({
+    id: local ? `local-${n}` : `server-${n}`, serverEpisodeId: `server-${n}`,
+    title: `Episode ${n}`, duration: 300, publishedAt: n + 1,
+    season: n + 1, episode: n + 1,
+    audioFile: local ? null : { metadata: { filename: `${n}.mp3` } },
+    audioTrack: local ? { metadata: { filename: `${n}.mp3` } } : undefined
+  }))
+  const settings = Vue.observable({ podcastEpisodesFilterBy: filter, podcastEpisodesOrderBy: order, podcastEpisodesOrderDesc: false })
+  const state = Vue.observable({ socketConnected: !local,
+    user: { user: local ? null : { mediaProgress: [
+      { libraryItemId: 'podcast', episodeId: 'server-1', isFinished: false },
+      { libraryItemId: 'podcast', episodeId: 'server-2', isFinished: true },
+      { libraryItemId: 'other', episodeId: 'server-0', isFinished: true }
+    ] } },
+    globals: { localMediaProgress: [
+      { localLibraryItemId: 'podcast', localEpisodeId: 'local-1', isFinished: false },
+      { localLibraryItemId: 'podcast', localEpisodeId: 'local-2', isFinished: true },
+      { localLibraryItemId: 'other', localEpisodeId: 'local-0', isFinished: true }
+    ] }
+  })
+  const store = { state, getters: {
+    'user/getUserSetting': key => settings[key],
+    'user/getUserMediaProgress': (item, episode) => state.user.user?.mediaProgress.find(p => p.libraryItemId === item && p.episodeId === episode),
+    'globals/getLocalMediaProgressById': (item, episode) => state.globals.localMediaProgress.find(p => p.localLibraryItemId === item && p.localEpisodeId === episode)
+  }, dispatch(_action, payload) { Object.assign(settings, payload) } }
+  const view = new Vue({ ...renderedTable, propsData: { libraryItem: { id: 'podcast' }, episodes, isLocal: local,
+    localEpisodes: local ? episodes : [{ id: 'local-0', serverEpisodeId: 'server-0' }]
+  }, beforeCreate() { this.$store = store; this.$platform = platform; this.$strings = strings; this.$socket = { $on() {}, $off() {} } } })
+  return { view, store, settings, episodes }
+}
+const ids = episodes => Array.from(episodes, e => e.id)
+const expectedFilters = { all: [0, 1, 2], incomplete: [0, 1], inProgress: [1], complete: [2], downloaded: [0] }
+
+for (const platform of ['android', 'ios', 'web']) {
+  for (const local of [false, true]) {
+    test(`${platform}: all filters use the correct ${local ? 'offline local' : 'server'} episode and progress IDs`, async () => {
+      const { view, settings, store, episodes } = reactiveTable({ platform, local })
+      const prefix = local ? 'local-' : 'server-'
+      const originalIds = ids(episodes)
+      // Check every directed pair, including empty -> nonempty transitions.
+      for (const from of Object.keys(expectedFilters)) {
+        for (const to of Object.keys(expectedFilters)) {
+          view.setFilter(from)
+          await Vue.nextTick()
+          view.setFilter(to)
+          await Vue.nextTick()
+          const expected = local && to === 'downloaded' ? [0, 1, 2] : expectedFilters[to]
+          assert.equal(settings.podcastEpisodesFilterBy, to)
+          assert.deepEqual(ids(view.episodesFiltered), expected.map(n => prefix + n))
+          assert.deepEqual(ids(view.episodesSorted), expected.map(n => prefix + n))
+          assert.equal(view.episodesAreFiltered, expected.length !== episodes.length)
+          assert.deepEqual(ids(episodes), originalIds, 'filters must preserve the source array')
+        }
+      }
+      store.state.socketConnected = !store.state.socketConnected
+      assert.deepEqual(ids(view.episodesFiltered), (local ? [0, 1, 2] : [0]).map(n => prefix + n), 'connection state must not change download identity')
+      view.$destroy()
+    })
+  }
+}
+
+test('Downloaded follows added/removed local associations without matching a local ID to a server ID', async () => {
+  const { view } = reactiveTable({ filter: 'downloaded' })
+  assert.deepEqual(ids(view.episodesFiltered), ['server-0'])
+  view.localEpisodes.push({ id: 'server-1', serverEpisodeId: 'unrelated-server-episode' })
+  assert.deepEqual(ids(view.episodesFiltered), ['server-0'])
+  view.localEpisodes.push({ id: 'local-1', serverEpisodeId: 'server-1' })
+  await Vue.nextTick()
+  assert.deepEqual(ids(view.episodesFiltered), ['server-0', 'server-1'])
+  view.localEpisodes = []
+  assert.equal(view.episodesFiltered.length, 0)
+  view.episodes = []
+  assert.equal(view.episodesSorted.length, 0)
+})
+
+test('local-only imported episodes remain Downloaded without server associations or duplicate local props', () => {
+  const { view } = reactiveTable({ local: true, filter: 'downloaded' })
+  view.localEpisodes = []
+  view.episodes = [{ id: 'imported', title: 'Imported episode' }]
+  table.watch.episodes.handler.call(view)
+  assert.deepEqual(ids(view.episodesFiltered), ['imported'])
+})
+
+for (const local of [false, true]) {
+  test(`${local ? 'local' : 'server'} progress filters react to finish, unfinish, reset, and episode replacement`, async () => {
+    const { view, store } = reactiveTable({ local, filter: 'complete' })
+    const progress = local ? store.state.globals.localMediaProgress : store.state.user.user.mediaProgress
+    progress[1].isFinished = false
+    await Vue.nextTick()
+    assert.equal(view.episodesFiltered.length, 0)
+    progress[0].isFinished = true
+    assert.deepEqual(ids(view.episodesFiltered), [local ? 'local-1' : 'server-1'])
+    if (local) store.state.globals.localMediaProgress = []
+    else store.state.user.user = null
+    view.setFilter('inProgress')
+    assert.equal(view.episodesFiltered.length, 0)
+    view.setFilter('incomplete')
+    assert.equal(view.episodesFiltered.length, 3)
+    view.episodes = [view.episodes[0]]
+    await Vue.nextTick()
+    assert.equal(view.episodesFiltered.length, 1)
+    view.episodes = []
+    await Vue.nextTick()
+    assert.equal(view.episodesFiltered.length, 0)
+  })
+}
+
+for (const local of [false, true]) {
+  for (const sort of ['publishedAt', 'title', 'season', 'episode', 'audioFile.metadata.filename']) {
+    test(`${local ? 'local' : 'server'} ${sort} sort works with each filter in both directions`, () => {
+      const { view, episodes } = reactiveTable({ local, order: sort })
+      for (const filter of Object.keys(expectedFilters)) {
+        view.setFilter(filter)
+        const expected = local && filter === 'downloaded' ? [0, 1, 2] : expectedFilters[filter]
+        for (const descending of [false, true]) {
+          view.sortDesc = descending
+          assert.deepEqual(ids(view.episodesSorted), (descending ? [...expected].reverse() : expected).map(n => `${local ? 'local-' : 'server-'}${n}`))
+          assert.deepEqual(ids(episodes), [0, 1, 2].map(n => `${local ? 'local-' : 'server-'}${n}`))
+        }
+      }
+    })
+  }
+}
+
+// Render real EpisodeRow components: testing the computed count alone misses a row render exception.
+async function renderRows({ local, filter, filenameShape } = {}) {
+  const { view, store, episodes } = reactiveTable({ local, filter, order: 'audioFile.metadata.filename' })
+  if (filenameShape) for (const e of episodes) Object.assign(e, filenameShape)
+  const errors = []
+  const previous = Vue.config.errorHandler
+  Vue.config.errorHandler = error => errors.push(error)
+  const rowView = Vue.extend({ ...renderedRow, beforeCreate() {
+    this.$store = { ...store, getters: { ...store.getters, getIsMediaStreaming: () => false, 'globals/getDownloadItem': () => null } }
+    this.$platform = 'android'; this.$strings = strings
+    this.$getString = key => strings[key] || key
+    this.$secondsToTimestamp = value => String(value)
+    this.$elapsedPretty = value => String(value)
+    this.$formatDate = value => String(value)
+  } })
+  view.$options.components = { ...view.$options.components, 'tables-podcast-episode-row': rowView }
+  try {
+    const html = await renderer.renderToString(view)
+    assert.deepEqual(errors, [], 'every selected episode must render without an exception')
+    assert.match(html, new RegExp(`Episodes \\(${view.episodesFiltered.length}\\)`))
+    assert.equal((html.match(/episode-subtitle/g) || []).length, view.episodesFiltered.length, 'header count must equal rendered rows')
+    if (!filenameShape && view.episodesFiltered.length) assert.match(html, /\.mp3/)
+  } finally { Vue.config.errorHandler = previous }
+}
+for (const local of [false, true]) {
+  for (const filter of Object.keys(expectedFilters)) {
+    test(`rendered count matches ${local ? 'offline' : 'server'} ${filter} rows with Filename sorting`, () => renderRows({ local, filter }))
+  }
+}
+for (const filenameShape of [{ audioFile: null, audioTrack: null }, { audioFile: {} }, { audioFile: { metadata: null } }]) {
+  test(`missing filename metadata does not hide rows: ${JSON.stringify(filenameShape)}`, () => renderRows({ local: true, filter: 'all', filenameShape }))
+}
+
+test('Filename uses server metadata first, falls back to downloaded metadata, and sorts numerically', () => {
+  const { episodeFilename } = helpers.exports
+  assert.equal(episodeFilename({ audioFile: { metadata: { filename: 'server.mp3' } }, audioTrack: { metadata: { filename: 'local.mp3' } } }), 'server.mp3')
+  assert.equal(episodeFilename({ audioFile: {}, audioTrack: { metadata: { filename: 'local.mp3' } } }), 'local.mp3')
+  assert.equal(episodeFilename({}), '')
+  const { view } = reactiveTable({ local: true, order: 'audioFile.metadata.filename' })
+  view.episodes = [
+    { id: 'ten', audioFile: null, audioTrack: { metadata: { filename: 'episode10.mp3' } } },
+    { id: 'two', audioFile: null, audioTrack: { metadata: { filename: 'episode2.mp3' } } },
+    { id: 'missing', audioFile: null, audioTrack: null }
+  ]
+  table.watch.episodes.handler.call(view)
+  assert.deepEqual(ids(view.episodesSorted), ['missing', 'two', 'ten'])
+  view.sortDesc = true
+  assert.deepEqual(ids(view.episodesSorted), ['ten', 'two', 'missing'])
 })

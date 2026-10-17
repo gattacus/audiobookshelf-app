@@ -19,7 +19,7 @@
 
       <p v-if="sortKey === 'audioFile.metadata.filename'" class="text-xs text-fg-muted truncate mt-2 mb-0.5">
         <span class="font-semibold">{{ $getString('LabelFilename') }}</span
-        >: <span class="font-light">{{ episode.audioFile.metadata.filename }}</span>
+        >: <span class="font-light">{{ filename }}</span>
       </p>
 
       <div v-if="episodeNumber || season || episodeType" class="flex py-2 items-center -mx-0.5">
@@ -75,6 +75,7 @@
 import { AbsFileSystem, AbsDownloader } from '@/plugins/capacitor'
 import cellularPermissionHelpers from '@/mixins/cellularPermissionHelpers'
 import { waitForEpisodePaint } from '@/utils/episodeList'
+import { episodeFilename } from '@/utils/podcastEpisode'
 import { rememberEpisodePage, clearEpisodePage } from '@/utils/episodeNavigation'
 
 export default {
@@ -114,6 +115,9 @@ export default {
     },
     audioFile() {
       return this.episode.audioFile
+    },
+    filename() {
+      return episodeFilename(this.episode)
     },
     title() {
       return this.episode.title || ''

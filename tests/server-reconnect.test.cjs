@@ -13,7 +13,7 @@ function context(platform = 'android') {
   const module = { exports: {} }
   vm.runInNewContext(source.script.content.replace(/^import .*$/gm, '').replace('export default ', 'module.exports = '), {
     module, console: { log() {}, warn() {}, error() {} }, Date,
-    AbsLogger: { info() {}, error() {} }, document: { removeEventListener() {} },
+    AbsLogger: { info() {}, error() {} }, document: { visibilityState: 'visible', removeEventListener() {} },
     setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, { fn, delay }); return id },
     clearTimeout(id) { timers.delete(id) }
   })
@@ -25,7 +25,7 @@ function context(platform = 'android') {
     $store: { state: { connectionAttemptIsBackground: false }, getters: {}, commit(type, value) { if (type === 'user/setUser') ctx.user = value; if (type === 'setConnectionAttemptIsBackground') ctx.$store.state.connectionAttemptIsBackground = value }, dispatch: async () => {} },
     $nativeHttp: { post: async (url, data, options) => { requests.push(options); throw new Error('Network not ready') } },
     $localStore: { getLastLibraryId: async () => null }, $isValidVersion: () => false,
-    $socket: { connect(...args) { connections.push(args) }, off() {} }, $eventBus: { $off() {} },
+    $socket: { connect(...args) { connections.push(args) }, off() {}, stopRecovery() {}, recover() {} }, $eventBus: { $off() {}, $emit() {} },
     initLibraries: async () => {}
   }
   for (const [name, fn] of Object.entries(layout.methods)) ctx[name] = fn.bind(ctx)
@@ -178,4 +178,27 @@ test('initial authorize is visible; scheduled retries remain in flight without r
   assert.equal(app.ctx.attemptingConnection, false)
   assert.equal(app.ctx.$store.state.connectionAttemptIsBackground, false)
   assert.equal(app.timers.size, 1)
+})
+
+test('network restoration recovers an existing Android socket while offline cancels its recovery timer', () => {
+  const app = context(); app.ctx.user = { id: 'user' }; app.ctx.currentLibraryId = 'library'; app.ctx.disconnectTime = Date.now()
+  let recoveries = 0, stops = 0
+  app.ctx.$socket.recover = () => { recoveries++ }; app.ctx.$socket.stopRecovery = () => { stops++ }
+  app.layout.watch.networkConnected.handler.call(app.ctx, false, true)
+  app.layout.watch.networkConnected.handler.call(app.ctx, true, false)
+  assert.equal(recoveries, 1); assert.equal(stops, 1); assert.equal(app.requests.length, 0)
+})
+
+test('Android foreground recovery checks existing socket authentication even without a network boolean transition', async () => {
+  const app = context(); app.ctx.user = { id: 'user' }; app.ctx.timeLostFocus = Date.now()
+  let recoveries = 0; app.ctx.$socket.recover = () => { recoveries++ }
+  await app.ctx.visibilityChanged()
+  assert.equal(recoveries, 1); assert.equal(app.requests.length, 0)
+})
+
+test('iOS foreground and network restoration do not enable Android socket recovery', async () => {
+  const app = context('ios'); app.ctx.user = { id: 'user' }; app.ctx.currentLibraryId = 'library'; app.ctx.disconnectTime = Date.now(); app.ctx.timeLostFocus = Date.now()
+  app.ctx.$socket.recover = () => assert.fail('Android-only recovery')
+  app.layout.watch.networkConnected.handler.call(app.ctx, true, false)
+  await app.ctx.visibilityChanged()
 })

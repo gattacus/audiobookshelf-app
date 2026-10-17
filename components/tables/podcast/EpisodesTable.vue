@@ -38,7 +38,7 @@
       </div>
     </div>
 
-    <tables-podcast-virtual-episodes v-if="$platform === 'android' && episodesSorted.length > 100" :episodes="episodesSorted" :reset-key="`${filterKey}:${sortKey}:${sortDesc}`">
+    <tables-podcast-virtual-episodes v-if="$platform === 'android' && episodesSorted.length > 100" :episodes="episodesSorted" :item-id="libraryItemId" :reset-key="`${filterKey}:${sortKey}:${sortDesc}`">
       <template #default="{ episode }">
         <tables-podcast-episode-row :episode="episode" :library-item="libraryItem" :local-episode="localEpisodeMap[episode.id]" :library-item-id="libraryItemId" :local-library-item-id="localLibraryItemId" :is-local="isLocal" :sort-key="sortKey" :key="episode.id" @addToPlaylist="addEpisodeToPlaylist" />
       </template>
@@ -61,6 +61,7 @@
 
 <script>
 import { Dialog } from '@capacitor/dialog'
+import { episodeFilename } from '@/utils/podcastEpisode'
 
 export default {
   props: {
@@ -179,7 +180,8 @@ export default {
     episodesFiltered() {
       return this.episodesCopy.filter((ep) => {
         if (this.filterKey === 'downloaded') {
-          return !!this.localEpisodeMap[ep.id]
+          // A local list already contains downloads, with local rather than server IDs.
+          return this.isLocal || !!this.localEpisodeMap[ep.id]
         }
         if (this.filterKey === 'all') return true
         var mediaProgress = this.getEpisodeProgress(ep)
@@ -199,7 +201,10 @@ export default {
         let aValue
         let bValue
 
-        if (this.sortKey.includes('.')) {
+        if (this.sortKey === 'audioFile.metadata.filename') {
+          aValue = episodeFilename(a)
+          bValue = episodeFilename(b)
+        } else if (this.sortKey.includes('.')) {
           const getNestedValue = (ob, s) => s.split('.').reduce((o, k) => o?.[k], ob)
           aValue = getNestedValue(a, this.sortKey)
           bValue = getNestedValue(b, this.sortKey)

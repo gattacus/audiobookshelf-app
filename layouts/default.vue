@@ -38,12 +38,16 @@ export default {
     },
     networkConnected: {
       handler(newVal, oldVal) {
-        if (!newVal) this.cancelConnectionRetry()
+        if (!newVal) {
+          this.cancelConnectionRetry()
+          if (this.$platform === 'android') this.$socket.stopRecovery()
+        }
         if (!this.hasMounted) {
           // watcher runs before mount, handling libraries/connection should be handled in mount
           return
         }
         if (newVal) {
+          if (this.$platform === 'android' && this.user) this.$socket.recover()
           console.log(`[default] network connected changed ${oldVal} -> ${newVal}`)
           if (!this.user) {
             this.attemptConnection()
@@ -362,6 +366,10 @@ export default {
     },
     async visibilityChanged() {
       if (document.visibilityState === 'visible') {
+        if (this.$platform === 'android') {
+          if (this.user) this.$socket.recover()
+          else this.attemptConnection(true)
+        }
         const elapsedTimeOutOfFocus = Date.now() - this.timeLostFocus
         console.log(`✅ [default] device visibility: has focus (${elapsedTimeOutOfFocus}ms out of focus)`)
         // If device out of focus for more than 30s then reload local media progress

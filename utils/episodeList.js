@@ -21,3 +21,20 @@ export function episodeWindow(offsets, top, height, overscan = 500) {
 export function waitForEpisodePaint() {
   return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
 }
+
+// Keep only the last list's measured heights; no media or persistent user data.
+const previousLayouts = new WeakMap()
+
+function layoutIdentity(store, itemId) {
+  return JSON.stringify([itemId, store.state.user.serverConnectionConfig?.id, store.state.user.user?.id])
+}
+
+export function getEpisodeLayout(store, itemId) {
+  const layout = previousLayouts.get(store)
+  if (!layout || layout.identity !== layoutIdentity(store, itemId)) return null
+  return { width: layout.width, heights: { ...layout.heights } }
+}
+
+export function rememberEpisodeLayout(store, itemId, width, heights) {
+  previousLayouts.set(store, { identity: layoutIdentity(store, itemId), width, heights: { ...heights } })
+}
