@@ -51,9 +51,15 @@
         <!-- Download Section -->
         <div v-if="userCanDownload" class="flex items-center">
           <span v-if="isLocal" class="material-symbols px-2 text-success text-2xl leading-none">audio_file</span>
+          <button v-else-if="!localEpisode && downloadItem && $platform === 'android'" type="button" class="mx-1.5 text-warning text-opacity-75" :disabled="cancellingDownload" :aria-label="$strings.ButtonCancelDownload" @click.stop="cancelDownload">
+            <span class="material-symbols text-2xl leading-none animate-bounce">downloading</span>
+          </button>
           <span v-else-if="!localEpisode" class="material-symbols mx-1.5 text-2xl leading-none" :class="downloadItem || startingDownload ? 'animate-bounce text-warning text-opacity-75' : ''" @click.stop="downloadClick">
             {{ downloadItem || startingDownload ? 'downloading' : 'download' }}
           </span>
+          <button v-else-if="$platform === 'android'" type="button" class="px-2 text-success" :disabled="removingDownload" :aria-label="$strings.ButtonRemoveDownload" @click.stop="removeDownload">
+            <span class="material-symbols text-2xl leading-none">download_done</span>
+          </button>
           <span v-else class="material-symbols px-2 text-success text-2xl leading-none">download_done</span>
         </div>
 
@@ -73,6 +79,7 @@
 
 <script>
 import { AbsFileSystem, AbsDownloader } from '@/plugins/capacitor'
+import { Dialog } from '@capacitor/dialog'
 import cellularPermissionHelpers from '@/mixins/cellularPermissionHelpers'
 import { waitForEpisodePaint } from '@/utils/episodeList'
 import { episodeFilename } from '@/utils/podcastEpisode'
@@ -100,7 +107,9 @@ export default {
       isProcessingReadUpdate: false,
       processing: false,
       openingEpisode: false,
-      startingDownload: false
+      startingDownload: false,
+      removingDownload: false,
+      cancellingDownload: false
     }
   },
   computed: {
@@ -190,6 +199,85 @@ export default {
     }
   },
   methods: {
+    async cancelDownload() {
+      if (this.$platform !== 'android' || this.cancellingDownload || !this.downloadItem?.id || this.localEpisode) return
+      const id = this.downloadItem.id
+      const itemId = this.libraryItemId
+      const episodeId = this.episode.id
+      this.cancellingDownload = true
+      try {
+        await this.$hapticsImpact()
+        const { value } = await Dialog.confirm({
+          title: this.$strings.HeaderCancelDownload,
+          message: this.$getString('MessageConfirmCancelEpisodeDownload', [this.title]),
+          okButtonTitle: this.$strings.ButtonCancelDownload,
+          cancelButtonTitle: this.$strings.ButtonKeepDownloading
+        })
+        if (!value || this._isDestroyed || this.libraryItemId !== itemId || this.episode.id !== episodeId || this.downloadItem?.id !== id || this.localEpisode) return
+        const result = await AbsDownloader.cancelDownloadItem({ downloadItemId: id })
+        if (result?.status === 'CANCELLED' || result?.status === 'NOT_FOUND') {
+          this.$store.commit('globals/removeItemDownload', id)
+          this.startingDownload = false
+        } else {
+          this.$toast.error(result?.status === 'FINISHING' ? this.$strings.MessageDownloadFinishing : this.$strings.MessageCancelDownloadFailed)
+        }
+      } catch (error) {
+        console.error('Failed to cancel episode download', error)
+        this.$toast.error(this.$strings.MessageCancelDownloadFailed)
+      } finally {
+        this.cancellingDownload = false
+      }
+    },
+    async removeDownload() {
+      if (this.$platform !== 'android' || this.isLocal || this.removingDownload || !this.localLibraryItemId || !this.localEpisode?.id) return
+      this.removingDownload = true
+      const itemId = this.libraryItemId
+      const episodeId = this.episode.id
+      const localItemId = this.localLibraryItemId
+      const localEpisodeId = this.localEpisode.id
+      // Resolve from current storage, not a possibly stale row or legacy track reference.
+      const targetFor = (item) => {
+        if (item?.id !== localItemId || item.libraryItemId !== itemId) return null
+        const episode = item.media?.episodes?.find((ep) => ep.id === localEpisodeId && ep.serverEpisodeId === episodeId)
+        const track = episode?.audioTrack
+        const file = item.localFiles?.find((file) => file.id && file.id === track?.localFileId)
+        if (!track?.contentUrl || !file || file.contentUrl !== track.contentUrl || episode.audioRemoved === true) return null
+        return { id: localItemId, trackLocalFileId: file.id, trackContentUrl: track.contentUrl }
+      }
+      try {
+        const target = targetFor(await this.$db.getLocalLibraryItem(localItemId))
+        if (!target) {
+          this.$toast.error(this.$strings.MessageRemoveDownloadFailed)
+          return
+        }
+        await this.$hapticsImpact()
+        const { value } = await Dialog.confirm({
+          title: this.$strings.HeaderRemoveDownload,
+          message: this.$getString('MessageConfirmRemoveEpisodeDownload', [this.title]),
+          okButtonTitle: this.$strings.ButtonRemoveDownload,
+          cancelButtonTitle: this.$strings.ButtonCancel
+        })
+        if (!value || this._isDestroyed || this.libraryItemId !== itemId || this.episode.id !== episodeId || this.localLibraryItemId !== localItemId || this.localEpisode?.id !== localEpisodeId) return
+        const currentTarget = targetFor(await this.$db.getLocalLibraryItem(localItemId))
+        if (!currentTarget || currentTarget.trackLocalFileId !== target.trackLocalFileId || currentTarget.trackContentUrl !== target.trackContentUrl) {
+          this.$toast.error(this.$strings.MessageRemoveDownloadFailed)
+          return
+        }
+        const updatedItem = await AbsFileSystem.deleteTrackFromItem(target)
+        if (updatedItem?.id !== localItemId) {
+          this.$toast.error(this.$strings.MessageRemoveDownloadFailed)
+          return
+        }
+        // The parent derives every row and the Downloaded filter from this local item.
+        this.$set(this.libraryItem, 'localLibraryItem', updatedItem)
+        this.$delete(this.episode, 'localEpisode')
+      } catch (error) {
+        console.error('Failed to remove episode download', error)
+        this.$toast.error(this.$strings.MessageRemoveDownloadFailed)
+      } finally {
+        this.removingDownload = false
+      }
+    },
     async goToEpisodePage() {
       const path = `/item/${this.libraryItemId}/${this.episode.id}`
       if (this.$platform !== 'android') return this.$router.push(path)

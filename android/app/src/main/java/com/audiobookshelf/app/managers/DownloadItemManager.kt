@@ -189,6 +189,50 @@ class DownloadItemManager(
   }
 
   @Synchronized
+  fun cancelDownloadItem(id: String): CancelResult {
+    val item = downloadItemQueue.find { it.id == id } ?: return CancelResult.NOT_FOUND
+    // Finalization may own a SAF copy or a scan outside this monitor. Let it finish.
+    if (id in finalizingItems || item.isDownloadFinished || item.downloadItemParts.any { it.isMoving || (it.moved && (it.audioTrack != null || it.episode != null || it.ebookFile != null)) })
+      return CancelResult.FINISHING
+    val roots = listOfNotNull(File(context.filesDir, "download-staging"),
+      context.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS)?.let { File(it, "download-staging") })
+    val staging = item.downloadItemParts.map { part ->
+      val path: String? = part.destinationPath
+      val file = path?.takeIf { it.isNotBlank() }?.let(::File)
+      if (file == null || !runCatching {
+        file.canonicalFile != File(part.finalDestinationPath).canonicalFile && !file.isDirectory &&
+          roots.any { file.canonicalFile.toPath().startsWith(it.canonicalFile.toPath()) && file.canonicalFile != it.canonicalFile }
+      }.getOrDefault(false)) return CancelResult.INVALID_STAGING
+      file
+    }
+    item.downloadItemParts.forEach { part ->
+      // Part IDs/cover destinations can be shared by other queued podcast episodes.
+      if (part in currentDownloadItemParts) {
+        val handle = activeCalls[part.id]
+        removeActivePart(part)
+        handle?.cancel()
+        reservations.remove(part.destinationPath)
+      }
+    }
+    downloadItemQueue.remove(item)
+    staging.forEach { file ->
+      val usedByAnother = downloadItemQueue.any { other -> other.downloadItemParts.any { it.destinationPath == file.path } }
+      if (!usedByAnother && file.exists() && !file.delete()) AbsLogger.error(tag, "Could not delete cancelled staging file ${file.name}")
+      if (!usedByAnother) reservations.remove(file.path)
+    }
+    IncompleteDownloadCleanup.cancel(context, id)
+    com.audiobookshelf.app.listening.ManagedDownloadStore.finishTransfer(item)
+    item.downloadItemParts.forEach { io.paperdb.Paper.book("deferredTransfers").delete(com.audiobookshelf.app.listening.ListeningStorageKeys.compact(it.id)) }
+    DeviceManager.dbManager.removeDownloadItem(id)
+    lastPersistTime.remove(id)
+    checkUpdateDownloadQueue()
+    notifyQueueChanged()
+    return CancelResult.CANCELLED
+  }
+
+  enum class CancelResult { CANCELLED, NOT_FOUND, FINISHING, INVALID_STAGING }
+
+  @Synchronized
   fun cancelAll() {
     activeCalls.values.forEach(InternalDownloadManager.DownloadHandle::cancel)
     activeCalls.clear()

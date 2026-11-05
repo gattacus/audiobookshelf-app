@@ -123,6 +123,14 @@ object DownloadServiceHost {
     }
   }
 
+  fun cancelDownloadItem(context: Context, id: String, callback: (DownloadItemManager.CancelResult) -> Unit) {
+    val queue = ensure(context)
+    scope.launch {
+      restoreJob?.join()
+      callback(queue.cancelDownloadItem(id))
+    }
+  }
+
   fun cancelAll(context: Context) {
     val queue = ensure(context)
     scope.launch {

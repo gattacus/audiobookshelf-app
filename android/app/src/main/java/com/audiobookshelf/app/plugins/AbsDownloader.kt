@@ -79,6 +79,15 @@ class AbsDownloader : Plugin() {
   }
 
   @PluginMethod
+  fun cancelDownloadItem(call: PluginCall) {
+    val id = call.getString("downloadItemId")?.takeIf { it.isNotBlank() }
+            ?: return call.reject("Missing download item ID")
+    DownloadServiceHost.cancelDownloadItem(mainActivity, id) { result ->
+      call.resolve(JSObject().put("status", result.name))
+    }
+  }
+
+  @PluginMethod
   fun retryDownloadItem(call: PluginCall) {
     val id = call.getString("downloadItemId") ?: return call.reject("Missing download item ID")
     DeviceManager.dbManager.getDownloadItems().find { it.id == id }?.let { com.audiobookshelf.app.listening.ManagedDownloadStore.finishTransfer(it) }
