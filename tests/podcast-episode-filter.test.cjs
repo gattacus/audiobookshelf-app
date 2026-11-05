@@ -27,6 +27,18 @@ function loadComponent(path) {
 const table = loadComponent('components/tables/podcast/EpisodesTable.vue')
 const row = loadComponent('components/tables/podcast/EpisodeRow.vue')
 
+test('episode rows fall back to episode duration for old zero-duration progress', () => {
+  const ctx = {
+    itemProgressPercent: 0.01,
+    itemProgress: { duration: 0, currentTime: 32.456 },
+    episode: { duration: 2062.254667 },
+    $elapsedPretty: seconds => `${seconds}s`
+  }
+  assert.equal(row.computed.timeRemaining.call(ctx), '2029s left')
+  ctx.itemProgress.currentTime = 2063
+  assert.equal(row.computed.timeRemaining.call(ctx), '0s left')
+})
+
 async function setup({ query = {}, filter = 'incomplete', platform = 'android' } = {}) {
   const router = new VueRouter({ mode: 'abstract', routes: [
     { path: '/item/:id/:episode', component: {} },
@@ -339,7 +351,10 @@ test('offline fallback podcast page upgrades to full server episode list on reco
     serverConnectionConfigId: 'cfg-1',
     mediaType: 'podcast',
     isLocal: true,
-    media: { metadata: { title: 'Sleep With Me Selection' }, episodes: localEpisodes }
+    media: { metadata: { title: 'Sleep With Me Selection' }, episodes: [
+      ...localEpisodes,
+      { id: 'local_ep_removed', serverEpisodeId: 'ep_removed', audioRemoved: true, audioTrack: null }
+    ] }
   }
   const serverItem = {
     id: 'sleep_with_me',
@@ -433,6 +448,7 @@ test('offline fallback podcast page upgrades to full server episode list on reco
 
   await itemPage.mounted.call(ctx)
   assert.equal(ctx.episodes.length, 9)
+  assert.equal(ctx.episodes.some(ep => ep.id === 'local_ep_removed'), false)
   assert.equal(router.currentRoute.query.noredirect, undefined, 'noredirect must be consumed so back navigation is not poisoned')
   assert.equal(router.currentRoute.query.localfallback, '1')
 

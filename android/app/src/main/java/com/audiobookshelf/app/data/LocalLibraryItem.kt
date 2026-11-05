@@ -8,7 +8,6 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.support.v4.media.MediaDescriptionCompat
-import android.util.Log
 import androidx.core.content.FileProvider
 import androidx.core.net.toFile
 import androidx.media.utils.MediaConstants
@@ -81,30 +80,26 @@ class LocalLibraryItem(
 
   @JsonIgnore
   fun hasTracks(ctx: Context, episode:PodcastEpisode?): Boolean {
-    var audioTracks = media.getAudioTracks() as MutableList<AudioTrack>
-    if (episode != null) { // Get podcast episode audio track
-      episode.audioTrack?.let { at -> mutableListOf(at) }?.let { tracks -> audioTracks = tracks }
+    val audioTracks = playbackTracks(episode)
+    return audioTracks.isNotEmpty() && audioTracks.all { track ->
+      val path = track.metadata?.path
+      val url: String? = track.contentUrl
+      !path.isNullOrBlank() && !url.isNullOrBlank() && LocalFile("", null, url, "", path, null, 0).exists(ctx)
     }
-    if (audioTracks.size == 0) return false
-    audioTracks.forEach {
-      // Check that metadata is not null
-      if (it.metadata === null) {
-        return false
-      }
-      if (!trackExists(ctx, it.contentUrl, it.metadata!!.path)) {
-        return false
-      }
-    }
-    return true
   }
 
   @JsonIgnore
-  private fun trackExists(ctx: Context, contentUrl: String?, path: String): Boolean {
-    return LocalFile("", null, contentUrl ?: "", "", path, null, 0).exists(ctx)
+  internal fun playbackTracks(episode: PodcastEpisode?): List<AudioTrack> {
+    if (!isPodcast) return if (episode == null) media.getAudioTracks() else emptyList()
+    // Download cleanup keeps episode metadata for progress and history. It is never a playlist.
+    if (episode == null || episode.audioRemoved == true) return emptyList()
+    return listOfNotNull(episode.audioTrack)
   }
 
   @JsonIgnore
-  fun getPlaybackSession(episode:PodcastEpisode?, deviceInfo:DeviceInfo):PlaybackSession {
+  fun getPlaybackSession(episode:PodcastEpisode?, deviceInfo:DeviceInfo):PlaybackSession? {
+    val audioTracks = playbackTracks(episode).toMutableList()
+    if (audioTracks.isEmpty()) return null
     val localEpisodeId = episode?.id
     val sessionId = "${UUID.randomUUID()}"
 
@@ -115,17 +110,10 @@ class LocalLibraryItem(
 
 
     val mediaMetadata = media.metadata
-    var chapters = if (mediaType == "book") (media as Book).chapters else mutableListOf()
-    var audioTracks = media.getAudioTracks() as MutableList<AudioTrack>
+    val chapters = if (mediaType == "book") (media as Book).chapters else episode?.chapters
     val authorName = mediaMetadata.getAuthorDisplayName()
     val displayTitle = episode?.title ?: mediaMetadata.title
-    var duration = getDuration()
-    if (episode != null) { // Get podcast episode audio track
-      episode.audioTrack?.let { at -> mutableListOf(at) }?.let { tracks -> audioTracks = tracks }
-      chapters = episode.chapters
-      duration = episode.audioTrack?.duration ?: 0.0
-      Log.d("LocalLibraryItem", "getPlaybackSession: Got podcast episode audio track ${audioTracks.size}")
-    }
+    val duration = audioTracks.sumOf { it.duration }
 
     val dateNow = System.currentTimeMillis()
     return PlaybackSession(sessionId,serverUserId,libraryItemId,episode?.serverEpisodeId, mediaType, mediaMetadata, deviceInfo,chapters ?: mutableListOf(), displayTitle, authorName,null,duration,PLAYMETHOD_LOCAL,dateNow,0L,0L, audioTracks,currentTime,null,this,localEpisodeId,serverConnectionConfigId, serverAddress, "exo-player")

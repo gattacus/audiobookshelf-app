@@ -486,7 +486,7 @@ export default {
       return this.$store.getters['globals/getDownloadItem'](this.libraryItemId)
     },
     episodes() {
-      return this.media.episodes || []
+      return this.isLocal ? this.localLibraryItemEpisodes : this.media.episodes || []
     },
     isCasting() {
       return this.$store.state.isCasting
@@ -548,7 +548,7 @@ export default {
       if (this.playerIsStartingPlayback) return
 
       if (this.isPodcast) {
-        this.episodes.sort((a, b) => {
+        const episodes = [...this.episodes].sort((a, b) => {
           if (this.podcastType === 'serial') {
             return String(a.publishedAt).localeCompare(String(b.publishedAt), undefined, { numeric: true, sensitivity: 'base' })
           } else {
@@ -556,7 +556,7 @@ export default {
           }
         })
 
-        let episode = this.episodes.find((ep) => {
+        let episode = episodes.find((ep) => {
           var podcastProgress = null
           if (!this.isLocal) {
             podcastProgress = this.$store.getters['user/getUserMediaProgress'](this.libraryItemId, ep.id)
@@ -566,13 +566,14 @@ export default {
           return !podcastProgress?.isFinished
         })
 
-        if (!episode) episode = this.episodes[0]
+        if (!episode) episode = episodes[0]
+        if (!episode) return
 
         const episodeId = episode.id
 
         let localEpisode = null
         if (this.hasLocal && !this.isLocal) {
-          localEpisode = this.localLibraryItem.media.episodes.find((ep) => ep.serverEpisodeId == episodeId)
+          localEpisode = this.localLibraryItemEpisodes.find((ep) => ep.serverEpisodeId == episodeId)
         } else if (this.isLocal) {
           localEpisode = episode
         }

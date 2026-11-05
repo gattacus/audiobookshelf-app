@@ -102,6 +102,20 @@ class OfflineProgressSyncTest {
     finishedAt = if (isFinished) lastUpdate else null
   )
 
+  @Test fun oldWrongEpisodeSessionDoesNotUploadItsPositionThroughProgressReconciliation() {
+    val bad = session("bad", episodeId = "episode-1").apply {
+      duration = 0.0
+      localEpisodeId = "local_episode-1"
+    }
+    val progress = localProgress(id = bad.localMediaProgressId, episodeId = "episode-1",
+      currentTime = 30.0, progress = 1.0, isFinished = true).apply { duration = 0.0 }
+
+    assertTrue(bad.hasMismatchedLocalPodcastTracks)
+    assertTrue(LocalProgressReconciler.reconcile(listOf(progress), emptyList(), listOf(bad)).serverPatches.isEmpty())
+    assertEquals(1, LocalProgressReconciler.reconcile(listOf(progress), emptyList(), emptyList()).serverPatches.size)
+    assertFalse(session("valid", episodeId = "episode-1").hasMismatchedLocalPodcastTracks)
+  }
+
   @Test fun streamingFailingOrSkippedTicksDoNotQuadraticallyInflateSessionTimeListening() {
     val tracker = ListeningTimeTracker()
     val pbSession = session("stream-1", playMethod = PLAYMETHOD_DIRECTPLAY, timeListening = 0L)

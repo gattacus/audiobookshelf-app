@@ -29,7 +29,7 @@
 
     <!-- action buttons -->
     <div class="flex mt-4 -mx-1">
-      <ui-btn color="success" class="flex items-center justify-center flex-grow mx-1" :loading="playerIsStartingForThisMedia" :padding-x="4" @click="playClick">
+      <ui-btn v-if="!localAudioRemoved" color="success" class="flex items-center justify-center flex-grow mx-1" :loading="playerIsStartingForThisMedia" :padding-x="4" @click="playClick">
         <span class="material-symbols text-2xl fill">{{ playerIsPlaying ? 'pause' : 'play_arrow' }}</span>
         <span class="px-1 text-sm">{{ playerIsPlaying ? $strings.ButtonPause : localEpisodeId ? $strings.ButtonPlay : $strings.ButtonStream }}</span>
       </ui-btn>
@@ -171,6 +171,9 @@ export default {
       if (this.isLocal) return this.episode
       return this.episode.localEpisode?.audioRemoved === true ? null : this.episode.localEpisode
     },
+    localAudioRemoved() {
+      return this.isLocal && this.episode.audioRemoved === true
+    },
     localEpisodeId() {
       if (this.localEpisode) return this.localEpisode.id
       return null
@@ -254,13 +257,13 @@ export default {
     userTimeRemaining() {
       if (!this.userItemProgress) return 0
       const duration = this.userItemProgress.duration || this.episode.duration
-      return duration - this.userItemProgress.currentTime
+      return Math.max(0, (duration || 0) - this.userItemProgress.currentTime)
     },
     timeRemaining() {
       if (this.playerIsPlaying) return 'Playing'
       if (!this.progressPercent) return this.$elapsedPretty(this.episode.duration)
       if (this.userIsFinished) return 'Finished'
-      const remaining = Math.floor(this.userItemProgress.duration - this.userItemProgress.currentTime)
+      const remaining = Math.floor(this.userTimeRemaining)
       return `${this.$elapsedPretty(remaining)} left`
     },
     publishedAt() {
@@ -386,7 +389,7 @@ export default {
     },
     async clickPlaybackTime(event) {
       const startTime = event.target.getAttribute('data-time')
-      if (this.playerIsStartingPlayback) return
+      if (this.playerIsStartingPlayback || this.localAudioRemoved) return
 
       await this.$hapticsImpact()
 

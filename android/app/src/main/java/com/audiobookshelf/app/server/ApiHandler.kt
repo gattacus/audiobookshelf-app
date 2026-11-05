@@ -742,7 +742,7 @@ class ApiHandler(var ctx:Context) {
   }
 
   fun sendSyncLocalSessions(playbackSessions:List<PlaybackSession>, config:ServerConnectionConfig? = null, cb: (Boolean, String?) -> Unit) {
-    val validSessions = OfflineSessionCleanup.validSessions(playbackSessions)
+    val validSessions = OfflineSessionCleanup.validSessions(playbackSessions).filterNot { it.hasMismatchedLocalPodcastTracks }
     if (validSessions.isEmpty()) return cb(true, null)
 
     @SuppressLint("HardwareIds")

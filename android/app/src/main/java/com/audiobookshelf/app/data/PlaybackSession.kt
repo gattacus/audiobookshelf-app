@@ -66,6 +66,11 @@ class PlaybackSession(
   val isPodcastEpisode
     get() = mediaType == "podcast"
   @get:JsonIgnore
+  internal val hasMismatchedLocalPodcastTracks: Boolean
+    // Older builds gave an episode with no audio a zero duration and queued other episodes.
+    get() = isLocal && isPodcastEpisode && duration == 0.0 &&
+      audioTracks.orEmpty().any { track: AudioTrack? -> (track?.duration ?: 0.0) > 0.0 }
+  @get:JsonIgnore
   val currentTimeMs
     get() = (currentTime * 1000L).toLong()
   @get:JsonIgnore

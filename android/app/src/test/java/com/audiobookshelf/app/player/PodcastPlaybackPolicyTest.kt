@@ -2,11 +2,32 @@ package com.audiobookshelf.app.player
 
 import org.junit.Assert.*
 import org.junit.Test
-import com.audiobookshelf.app.data.PodcastEpisode
+import com.audiobookshelf.app.data.*
 
 class PodcastPlaybackPolicyTest {
   private fun episode(id: String, date: Long?, finished: Boolean = false, available: Boolean = true, index: Int = 0) =
     PodcastPlaybackPolicy.Episode(id, date, index, finished, available)
+
+  @Test fun localEpisodePlaybackNeverFallsBackToOtherEpisodes() {
+    val otherTrack = AudioTrack(1, 0.0, 1800.0, "other.opus", "file:///other.opus", "audio/opus", null, true, "other-file", null)
+    fun record(id: String, track: AudioTrack?) =
+      PodcastEpisode(id, 1, null, null, id, null, null, null, 1L, null, track, null, 1800.0, null, id, id)
+    val removed = record("removed", null).apply { audioRemoved = true }
+    val legacyMissing = record("legacy", null)
+    val other = record("other", otherTrack)
+    val podcast = Podcast(PodcastMetadata("Podcast", null, null, mutableListOf(), false), null, mutableListOf(),
+      mutableListOf(removed, legacyMissing, other), false, 3)
+    val local = LocalLibraryItem("local_podcast", "internal-podcast", "", "", "", false,
+      "podcast", podcast, mutableListOf(), null, null, true, null, null, null, null)
+    val device = DeviceInfo("device", "Google", "Pixel", 36, "test")
+
+    assertNull(local.getPlaybackSession(removed, device))
+    assertNull(local.getPlaybackSession(legacyMissing, device))
+    assertNull(local.getPlaybackSession(null, device))
+    assertEquals(listOf(otherTrack), local.playbackTracks(other))
+    removed.audioTrack = otherTrack // Even a stale track reference cannot make a removed episode playable.
+    assertNull(local.getPlaybackSession(removed, device))
+  }
 
   @Test fun legacyNullIdsAndElementsAreDiscardedWithoutBlockingValidEpisodes() {
     fun record(id: String) = PodcastEpisode(id, 1, null, null, null, null, null, null, 1L, null, null, null, null, null, null, null)

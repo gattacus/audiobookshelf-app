@@ -353,20 +353,21 @@ class AbsAudioPlayer : Plugin() {
       DeviceManager.dbManager.getLocalLibraryItem(libraryItemId)?.let {
         var episode: PodcastEpisode? = null
         if (episodeId.isNotEmpty()) {
-          val podcastMedia = it.media as Podcast
-          episode = podcastMedia.episodes?.find { ep -> ep.id == episodeId }
+          episode = (it.media as? Podcast)?.episodes?.find { ep -> ep.id == episodeId }
           if (episode == null) {
             Log.e(tag, "prepareLibraryItem: Podcast episode not found $episodeId")
             return call.resolve(JSObject("{\"error\":\"Podcast episode not found\"}"))
           }
         }
         if (!it.hasTracks(mainActivity, episode)) {
-          return call.resolve(JSObject("{\"error\":\"No audio files found on device. Download book again to fix.\"}"))
+          val error = if (it.isPodcast) "This episode is not available on this device." else "No audio files found on device. Download book again to fix."
+          return call.resolve(JSObject().put("error", error))
         }
 
         Handler(Looper.getMainLooper()).post {
           Log.d(tag, "prepareLibraryItem: Preparing Local Media item ${jacksonMapper.writeValueAsString(it)}")
           val playbackSession = it.getPlaybackSession(episode, playerNotificationService.getDeviceInfo())
+            ?: return@post
           if (startTimeOverride != null) {
             Log.d(tag, "prepareLibraryItem: Using start time override $startTimeOverride")
             playbackSession.currentTime = startTimeOverride

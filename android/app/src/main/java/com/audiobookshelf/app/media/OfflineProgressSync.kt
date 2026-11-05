@@ -179,6 +179,10 @@ internal object LocalProgressReconciler {
           updatedLocals.add(local)
         }
       } else if (!local.libraryItemId.isNullOrBlank() && (server == null || local.lastUpdate > server.lastUpdate)) {
+        // Keep the local record for review without uploading a position from the wrong audio.
+        if (local.duration == 0.0 && validSessions.any { session ->
+            session.hasMismatchedLocalPodcastTracks && session.localMediaProgressId == local.id && session.updatedAt >= local.lastUpdate
+          }) continue
         val ebookChanged = !local.ebookLocation.isNullOrBlank() &&
           (server == null || local.ebookLocation != server.ebookLocation || local.ebookProgress != server.ebookProgress)
         val finishedChanged = if (server == null) local.isFinished else local.isFinished != server.isFinished
