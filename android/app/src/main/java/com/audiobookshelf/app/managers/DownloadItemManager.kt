@@ -49,6 +49,32 @@ class DownloadItemManager(
           jacksonObjectMapper()
                   .enable(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature())
 
+  private var executionEnabled = true
+  private var allowManual = true
+  @Synchronized fun setExecutionOwner(enabled: Boolean, manual: Boolean) {
+    executionEnabled = enabled
+    allowManual = manual
+    pauseDisallowed()
+  }
+  private fun canRun(item: DownloadItem): Boolean = executionEnabled &&
+    (allowManual || com.audiobookshelf.app.listening.ManagedDownloadStore.transfer(item) != null) &&
+    com.audiobookshelf.app.listening.DownloadAutomation.allowed(context, item)
+  @Synchronized fun pauseDisallowed() {
+    currentDownloadItemParts.toList().forEach { part ->
+      val item = downloadItemQueue.find { it.id == part.downloadItemId } ?: return@forEach
+      if (!canRun(item) && !part.isMoving) {
+        val handle = activeCalls[part.id]
+        removeActivePart(part)
+        handle?.cancel()
+        reservations.remove(part.destinationPath)
+        part.downloadId = null
+        // On recovery resume only staging belonging to an explicitly deferred transfer.
+        io.paperdb.Paper.book("deferredTransfers").write(com.audiobookshelf.app.listening.ListeningStorageKeys.compact(part.id), true)
+        persist(item, force = true)
+      }
+    }
+  }
+
   var downloadItemQueue: MutableList<DownloadItem> = mutableListOf()
     private set
   var currentDownloadItemParts: MutableList<DownloadItemPart> = mutableListOf()
@@ -203,8 +229,16 @@ class DownloadItemManager(
                   }
 
   @Synchronized
+  fun hasEligibleWork(): Boolean = finalizingItems.isNotEmpty() || downloadItemQueue.any { item ->
+    com.audiobookshelf.app.listening.DownloadAutomation.allowed(context, item) &&
+      item.downloadItemParts.any { (!it.moved && !it.failed) || it.isMoving }
+  }
+
+  @Synchronized
   private fun checkUpdateDownloadQueue() {
+    pauseDisallowed()
     downloadItemQueue.toList().forEach { item ->
+      if (!canRun(item)) return@forEach
       var slots = MAX_SIMULTANEOUS_DOWNLOADS - currentDownloadItemParts.size
       if (slots <= 0) return@forEach
       item.downloadItemParts
@@ -256,7 +290,7 @@ class DownloadItemManager(
         }
       }
     }
-    if (hasWork()) startWatchingDownloads() else notifyQueueChanged()
+    if (hasWork() && executionEnabled) startWatchingDownloads() else notifyQueueChanged()
   }
 
   private fun startDownload(item: DownloadItem, part: DownloadItemPart) {
@@ -281,13 +315,21 @@ class DownloadItemManager(
                             object : InternalProgressCallback {
                               override fun onSizeResolved(totalBytes: Long) {
                                 synchronized(this@DownloadItemManager) {
-                                  if (part !in currentDownloadItemParts || totalBytes < 0L) return
+                                  if (downloadItemQueue.none { it === item } || currentDownloadItemParts.none { it === part } || totalBytes < 0L) return
                                   if (part.fileSize == totalBytes) return
                                   AbsLogger.info(
                                           tag,
                                           "Using server size $totalBytes instead of metadata size ${part.fileSize} for ${part.filename}"
                                   )
                                   part.fileSize = totalBytes
+                                  if (part.audioTrack != null) com.audiobookshelf.app.listening.ManagedDownloadStore.transfer(item)?.let { transfer ->
+                                    com.audiobookshelf.app.listening.ManagedDownloadStore.transfer(item, transfer.copy(reservedBytes = totalBytes))
+                                    if (!com.audiobookshelf.app.listening.DownloadAutomation.allowed(context, item)) {
+                                      val rule = com.audiobookshelf.app.listening.ManagedDownloadStore.rule(transfer.identity.copy(episodeId = null))
+                                      com.audiobookshelf.app.listening.ManagedDownloadStore.save(rule.copy(status = "Waiting for network, progress, or automatic storage limit"))
+                                      pauseDisallowed()
+                                    }
+                                  }
                                   part.lastUpdateTime = System.currentTimeMillis()
                                   persist(item, force = true)
                                   clientEventEmitter.onDownloadItemPartUpdate(part)
@@ -296,7 +338,7 @@ class DownloadItemManager(
 
                               override fun onProgress(totalBytesWritten: Long, progress: Long) {
                                 synchronized(this@DownloadItemManager) {
-                                  if (part !in currentDownloadItemParts) return
+                                  if (downloadItemQueue.none { it === item } || currentDownloadItemParts.none { it === part }) return
                                   part.bytesDownloaded = totalBytesWritten
                                   part.progress = progress
                                   part.lastUpdateTime = System.currentTimeMillis()
@@ -306,7 +348,7 @@ class DownloadItemManager(
 
                               override fun onComplete(failed: Boolean) {
                                 synchronized(this@DownloadItemManager) {
-                                  if (part !in currentDownloadItemParts) return
+                                  if (downloadItemQueue.none { it === item } || currentDownloadItemParts.none { it === part }) return
                                   part.failed = failed
                                   part.completed = !failed
                                   part.lastUpdateTime = System.currentTimeMillis()
@@ -317,14 +359,14 @@ class DownloadItemManager(
 
                               override fun onAuthError() {
                                 synchronized(this@DownloadItemManager) {
-                                  if (part !in currentDownloadItemParts) return
+                                  if (downloadItemQueue.none { it === item } || currentDownloadItemParts.none { it === part }) return
                                   handleAuthError(item, part)
                                 }
                               }
 
                               override fun onInsufficientSpace() {
                                 synchronized(this@DownloadItemManager) {
-                                  if (part !in currentDownloadItemParts) return
+                                  if (downloadItemQueue.none { it === item } || currentDownloadItemParts.none { it === part }) return
                                   failForStorage(item, part)
                                 }
                               }
@@ -343,6 +385,10 @@ class DownloadItemManager(
     watcherRunning = true
     scope.launch {
       while (true) {
+        synchronized(this@DownloadItemManager) {
+          pauseDisallowed()
+          if (!executionEnabled) { watcherRunning = false; return@launch }
+        }
         val activeParts =
                 synchronized(this@DownloadItemManager) { currentDownloadItemParts.toList() }
         activeParts.forEach(::handlePartUpdate)
@@ -359,14 +405,10 @@ class DownloadItemManager(
     }
   }
 
+  @Synchronized
   private fun handlePartUpdate(part: DownloadItemPart) {
+    val item = downloadItemQueue.find { queued -> queued.downloadItemParts.any { it === part } } ?: return
     clientEventEmitter.onDownloadItemPartUpdate(part)
-    val item =
-            synchronized(this) { downloadItemQueue.find { it.id == part.downloadItemId } }
-                    ?: run {
-                      removeActivePart(part)
-                      return
-                    }
     if (!part.completed && !part.failed) {
       val lastUpdate = part.lastUpdateTime ?: return
       if (System.currentTimeMillis() - lastUpdate > STALL_TIMEOUT_MS) {
@@ -482,6 +524,10 @@ class DownloadItemManager(
     part.isMoving = false
     part.waitingForSpace = false
     part.failureCode = failureCode
+    com.audiobookshelf.app.listening.ManagedDownloadStore.transfer(item)?.let { transfer ->
+      val rule = com.audiobookshelf.app.listening.ManagedDownloadStore.rule(transfer.identity.copy(episodeId = null))
+      com.audiobookshelf.app.listening.ManagedDownloadStore.save(rule.copy(status = "Download failed; open Downloads to retry"))
+    }
     item.terminalFailureAt = item.terminalFailureAt ?: System.currentTimeMillis()
     item.stagingCleanupAt = null
     persist(item, force = true)
@@ -608,7 +654,7 @@ class DownloadItemManager(
           folderScanner.scanDownloadItem(item) { scanResult ->
             val event =
                     JSObject().apply {
-                      put("libraryItemId", item.id)
+                      put("libraryItemId", item.libraryItemId)
                       put("localFolderId", item.localFolder.id)
                       scanResult?.localLibraryItem?.let {
                         put("localLibraryItem", JSObject(jacksonMapper.writeValueAsString(it)))
@@ -617,6 +663,10 @@ class DownloadItemManager(
                         put("localMediaProgress", JSObject(jacksonMapper.writeValueAsString(it)))
                       }
                     }
+            scanResult?.localLibraryItem?.let { com.audiobookshelf.app.listening.FinishedDownloadCleanup(context).recordDownload(item, it) }
+            com.audiobookshelf.app.listening.ManagedDownloadStore.finishTransfer(item)
+            item.downloadItemParts.forEach { io.paperdb.Paper.book("deferredTransfers").delete(com.audiobookshelf.app.listening.ListeningStorageKeys.compact(it.id)) }
+            com.audiobookshelf.app.listening.ProgressStatusStore.availabilityChanged()
             clientEventEmitter.onDownloadItemComplete(event)
             synchronized(this@DownloadItemManager) {
               downloadItemQueue.remove(item)
@@ -679,7 +729,7 @@ class DownloadItemManager(
   }
 
   private fun notifyQueueChanged() {
-    clientEventEmitter.onQueueChanged(hasWork())
+    clientEventEmitter.onQueueChanged(executionEnabled && hasEligibleWork())
   }
 
   fun destroy() {
@@ -769,6 +819,14 @@ class DownloadItemManager(
   /** Resets an unmoved part when recovery crosses a service-session boundary. */
   private fun resetPartForFreshDownload(part: DownloadItemPart): Boolean {
     val stagingFile = File(part.destinationPath)
+    if (io.paperdb.Paper.book("deferredTransfers").read<Boolean>(com.audiobookshelf.app.listening.ListeningStorageKeys.compact(part.id)) == true) {
+      part.downloadId = null
+      part.isMoving = false
+      part.failed = false
+      part.bytesDownloaded = stagingFile.takeIf { it.exists() }?.length() ?: 0
+      if (!stagingFile.exists()) part.completed = false
+      return true
+    }
     if (stagingFile.exists() && !stagingFile.delete()) {
       AbsLogger.error(tag, "Could not delete staging file ${part.filename}")
       part.failed = true

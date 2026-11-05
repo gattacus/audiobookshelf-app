@@ -8,7 +8,7 @@
 
 <script>
 import { Dialog } from '@capacitor/dialog'
-import { AbsAudioPlayer, AbsFileSystem } from '@/plugins/capacitor'
+import { AbsListening, AbsAudioPlayer, AbsFileSystem } from '@/plugins/capacitor'
 
 export default {
   props: {
@@ -34,8 +34,16 @@ export default {
   },
   data() {
     return {
+      keepDownloaded: false,
       showDetailsModal: false,
       showSendEbookDevicesModal: false
+    }
+  },
+  watch: {
+    async value(open) {
+      if (open && this.$platform === 'android' && this.serverLibraryItemId) {
+        try { this.keepDownloaded = (await AbsListening.getKeepDownloaded({ libraryItemId: this.serverLibraryItemId, episodeId: this.serverEpisodeId })).enabled } catch (_) { }
+      }
     }
   },
   computed: {
@@ -52,6 +60,7 @@ export default {
     },
     moreMenuItems() {
       const items = []
+      if (this.$platform === 'android' && this.serverLibraryItemId && (!this.isPodcast || this.episode)) items.push({ text: this.keepDownloaded ? 'Allow finished-download cleanup' : 'Keep downloaded', value: 'keepDownloaded', icon: this.keepDownloaded ? 'keep' : 'keep_off' })
 
       if (this.$platform === 'android' && !this.episode && (this.mediaType === 'book' || this.mediaType === 'podcast')) {
         items.push({ text: 'Add playback widget', value: 'playbackWidget', icon: 'widgets' })
@@ -269,7 +278,7 @@ export default {
     }
   },
   methods: {
-    moreMenuAction(action) {
+    async moreMenuAction(action) {
       this.show = false
       if (action === 'playbackWidget') {
         this.pinPlaybackWidget()
@@ -291,6 +300,9 @@ export default {
         this.$router.push(`/media/${this.mediaId}/history?title=${this.title}`)
       } else if (action === 'discardProgress') {
         this.clearProgressClick()
+      } else if (action === 'keepDownloaded') {
+        await AbsListening.setKeepDownloaded({ libraryItemId: this.serverLibraryItemId, episodeId: this.serverEpisodeId, enabled: !this.keepDownloaded })
+        this.keepDownloaded = !this.keepDownloaded
       } else if (action === 'deleteLocal') {
         this.deleteLocalItem()
       } else if (action === 'deleteLocalEpisode') {

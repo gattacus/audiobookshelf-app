@@ -180,7 +180,7 @@ class OfflineProgressSyncDeviceTest {
         plan.serverPatches.forEach { patch ->
           events.add("patchServer:${patch.libraryItemId}:isFinished=${patch.isFinished}")
         }
-        cb()
+        cb(true, null)
       },
       onComplete = { success, _ ->
         events.add("done")

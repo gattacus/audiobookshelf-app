@@ -214,6 +214,13 @@ class MediaProgressSyncer(
   }
 
   fun seek() {
+    // A freshly prepared paused player has not started a listening timer yet.
+    val prepared = playerNotificationService.currentPlaybackSession ?: return
+    if (currentPlaybackSession == null || com.audiobookshelf.app.listening.ListeningIdentity.from(currentPlaybackSession!!) != com.audiobookshelf.app.listening.ListeningIdentity.from(prepared)) {
+      // Initial preparation seeks are not a user edit and must not overwrite the restored checkpoint.
+      if (!playerNotificationService.attributedSeekPending) return
+      currentPlaybackSession = prepared.clone()
+    }
     currentPlaybackSession?.currentTime = playerNotificationService.getCurrentTimeSeconds()
     Log.d(tag, "seek: $currentDisplayTitle, currentTime=${currentPlaybackSession?.currentTime}")
 
@@ -222,7 +229,19 @@ class MediaProgressSyncer(
       return
     }
 
-    MediaEventManager.seekEvent(currentPlaybackSession!!, null)
+    val snapshot = currentPlaybackSession!!.clone().apply { updatedAt = System.currentTimeMillis() }
+    currentPlaybackSession = snapshot
+    try {
+      DeviceManager.dbManager.savePlaybackSession(snapshot)
+      if (snapshot.isLocal) saveLocalProgress(snapshot)
+    } catch (e: Exception) {
+      AbsLogger.error(tag, "Could not persist seek position (${e.javaClass.simpleName})")
+    }
+    if (!playerNotificationService.attributedSeekPending) MediaEventManager.seekEvent(snapshot, null)
+    playerNotificationService.attributedSeekPending = false
+    if (!playerNotificationService.currentPlayer.playWhenReady) {
+      com.audiobookshelf.app.listening.ProgressSyncWorker.enqueue(playerNotificationService.applicationContext, com.audiobookshelf.app.listening.ListeningIdentity.from(snapshot))
+    }
   }
 
   // Currently unused
@@ -276,12 +295,16 @@ class MediaProgressSyncer(
 
     // Save playback session to db (server linked sessions only)
     //   Sessions are removed once successfully synced with the server
-    currentPlaybackSession?.let { DeviceManager.dbManager.savePlaybackSession(it) }
+    try {
+      currentPlaybackSession?.let { DeviceManager.dbManager.savePlaybackSession(it) }
+    } catch (e: Exception) {
+      return cb(SyncResult(false, false, "Could not save progress on this phone"))
+    }
 
     if (currentIsLocal) {
       // Save local progress sync
       currentPlaybackSession?.let {
-        saveLocalProgress(it)
+        try { saveLocalProgress(it) } catch (e: Exception) { return cb(SyncResult(false, false, "Could not save progress on this phone")) }
 
         Log.d(
                 tag,

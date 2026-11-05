@@ -35,7 +35,9 @@ class InternalDownloadManager(
       if (cancelled.get()) call.cancel()
     }
 
-    override fun cancel() {
+    fun isCancelled(): Boolean = cancelled.get()
+
+    @Synchronized override fun cancel() {
       cancelled.set(true)
       activeCall.get()?.cancel()
     }
@@ -59,8 +61,16 @@ class InternalDownloadManager(
           token: String,
           handle: ActiveDownloadHandle,
           allowRestart: Boolean
-  ) {
+  ): Unit = synchronized(handle) {
+    if (handle.isCancelled()) return
     var existingBytes = destinationFile.takeIf { it.exists() }?.length() ?: 0L
+    val validatorKey = com.audiobookshelf.app.listening.ListeningStorageKeys.compact(destinationFile.absolutePath)
+    val validators = io.paperdb.Paper.book("downloadValidators")
+    val validator = validators.read<String>(validatorKey)
+    if (existingBytes > 0 && validator.isNullOrBlank()) {
+      FileOutputStream(destinationFile, false).use { }
+      existingBytes = 0
+    }
     AbsLogger.info(
             tag,
             "Starting ${if (existingBytes > 0L) "resumed" else "new"} download for ${destinationFile.name} at byte $existingBytes")
@@ -69,7 +79,7 @@ class InternalDownloadManager(
                     .url(url)
                     .addHeader("Accept-Encoding", "identity")
                     .addHeader("Authorization", "Bearer $token")
-                    .apply { if (existingBytes > 0L) header("Range", "bytes=$existingBytes-") }
+                    .apply { if (existingBytes > 0L) header("Range", "bytes=$existingBytes-").header("If-Range", validator!!) }
                     .build()
     val call = client.newCall(request)
     handle.setCall(call)
@@ -82,6 +92,7 @@ class InternalDownloadManager(
 
               override fun onResponse(call: Call, response: Response) {
                 response.use {
+                  if (handle.isCancelled()) return
                   try {
                     if (response.code == 401) {
                       AbsLogger.error(tag, "Download unauthorized (401) for ${destinationFile.name}")
@@ -134,7 +145,15 @@ class InternalDownloadManager(
                     val totalLength =
                             serverSize ?: if (expectedSize > 0L) expectedSize else 0L
 
-                    FileOutputStream(destinationFile, append).use { output ->
+                    val nextValidator = response.header("ETag")?.takeUnless { it.startsWith("W/") } ?: response.header("Last-Modified")
+                    // Cancellation and opening the staging file share a lock: after cancel
+                    // returns, a delayed response cannot recreate a deleted partial file.
+                    val outputStream = synchronized(handle) {
+                      if (handle.isCancelled()) return
+                      if (nextValidator != null) validators.write(validatorKey, nextValidator) else validators.delete(validatorKey)
+                      FileOutputStream(destinationFile, append)
+                    }
+                    outputStream.use { output ->
                       response.body!!.byteStream().use { input ->
                         val buffer = ByteArray(CHUNK_SIZE)
                         var totalBytes = startingBytes

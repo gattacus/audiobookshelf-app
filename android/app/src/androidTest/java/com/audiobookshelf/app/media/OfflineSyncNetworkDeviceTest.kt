@@ -138,7 +138,7 @@ class OfflineSyncNetworkDeviceTest {
     val api = ApiHandler(context)
     val completions = AtomicInteger()
     val done = CountDownLatch(2)
-    val complete: (Boolean, String?) -> Unit = { _, _ -> completions.incrementAndGet(); done.countDown() }
+    val complete: (Boolean, String?) -> Unit = { ok, error -> assertFalse(ok); assertNotNull(error); completions.incrementAndGet(); done.countDown() }
     api.syncLocalSessionsAndProgress(complete)
     assertTrue(userRequested.await(5, TimeUnit.SECONDS))
     api.syncLocalSessionsAndProgress(complete) // Coalesced caller must also finish.

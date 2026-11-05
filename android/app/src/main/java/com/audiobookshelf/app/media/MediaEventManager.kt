@@ -43,6 +43,13 @@ object MediaEventManager {
     addPlaybackEvent("Seek", playbackSession, syncResult)
   }
 
+  fun explicitSeekEvent(session: PlaybackSession, from: Double, to: Double, source: String) {
+    val history = getMediaItemHistoryMediaItem(session.mediaItemId) ?: createMediaItemHistoryForSession(session)
+    history.events.add(MediaItemEvent("Seek", "Playback", "Explicit jump", to, false, null, null, System.currentTimeMillis(), source, from))
+    DeviceManager.dbManager.saveMediaItemHistory(history)
+    clientEventEmitter?.onMediaItemHistoryUpdated(history)
+  }
+
   fun syncEvent(mediaProgress: MediaProgressWrapper, description: String) {
     Log.i(
             tag,

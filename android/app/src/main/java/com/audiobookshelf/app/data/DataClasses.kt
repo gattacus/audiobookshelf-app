@@ -99,20 +99,18 @@ class Podcast(
 
   @JsonIgnore
   override fun checkHasTracks():Boolean {
-    return (episodes?.size ?: numEpisodes ?: 0) > 0
+    return episodes?.any { it.audioRemoved != true && it.audioTrack != null } ?: ((numEpisodes ?: 0) > 0)
   }
 
   @JsonIgnore
   fun addEpisode(audioTrack:AudioTrack, episode:PodcastEpisode):PodcastEpisode {
     val localEpisodeId = "local_ep_" + episode.id
     val newEpisode = PodcastEpisode(localEpisodeId,(episodes?.size ?: 0) + 1,episode.episode,episode.episodeType,episode.title,episode.subtitle,episode.description,episode.pubDate,episode.publishedAt,null,audioTrack,episode.chapters,audioTrack.duration,episode.size, episode.id, localEpisodeId)
+    episodes?.removeAll { it.serverEpisodeId == episode.id || it.id == localEpisodeId }
     episodes?.add(newEpisode)
 
     var index = 1
-    episodes?.forEach {
-      it.index = index
-      index++
-    }
+    episodes?.forEach { it.index = index++ }
     return newEpisode
   }
 
@@ -273,7 +271,8 @@ data class PodcastEpisode(
   var duration:Double?,
   var size:Long?,
   var serverEpisodeId:String?, // For local podcasts to match with server podcasts
-  var localEpisodeId:String? // For Android Auto server episodes with local copy
+  var localEpisodeId:String?, // For Android Auto server episodes with local copy
+  var audioRemoved:Boolean? = null // Explicitly removed audio; legacy null is not proof of removal
 ) {
   @JsonIgnore
   fun getMediaDescription(libraryItem:LibraryItemWrapper, progress:MediaProgressWrapper?, ctx: Context): MediaDescriptionCompat {

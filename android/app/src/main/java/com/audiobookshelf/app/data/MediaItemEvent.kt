@@ -11,5 +11,7 @@ class MediaItemEvent(
   var serverSyncAttempted:Boolean?,
   var serverSyncSuccess:Boolean?,
   var serverSyncMessage:String?,
-  var timestamp: Long
+  var timestamp: Long,
+  var seekSource: String? = null,
+  var previousPosition: Double? = null
 )

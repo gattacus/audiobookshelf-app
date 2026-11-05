@@ -148,6 +148,7 @@
         </div>
 
         <!-- tables -->
+        <widgets-podcast-download-rule v-if="$platform === 'android' && isPodcast && !isLocal" :library-item="libraryItem" />
         <tables-podcast-episodes-table v-if="isPodcast" :library-item="libraryItem" :local-library-item-id="localLibraryItemId" :episodes="episodes" :local-episodes="localLibraryItemEpisodes" :is-local="isLocal" />
 
         <tables-chapters-table v-if="numChapters" :library-item="libraryItem" @playAtTimestamp="playAtTimestamp" />
@@ -255,7 +256,8 @@ export default {
     },
     hasLocal() {
       // Server library item has matching local library item
-      return this.isLocal || this.libraryItem.localLibraryItem
+      const item = this.isLocal ? this.libraryItem : this.libraryItem.localLibraryItem
+      return !!item && (item.mediaType === 'podcast' ? (item.media?.episodes || []).some(ep => ep.audioRemoved !== true) : (item.media?.tracks || []).some(track => item.localFiles?.some(f => f.id === track.localFileId)))
     },
     localLibraryItem() {
       if (this.isLocal) return this.libraryItem
@@ -267,7 +269,7 @@ export default {
     localLibraryItemEpisodes() {
       if (!this.isPodcast || !this.localLibraryItem) return []
       var podcastMedia = this.localLibraryItem.media
-      return podcastMedia?.episodes || []
+      return (podcastMedia?.episodes || []).filter(ep => ep.audioRemoved !== true)
     },
     serverLibraryItemId() {
       if (!this.isLocal) return this.libraryItem.id
@@ -502,6 +504,10 @@ export default {
     }
   },
   methods: {
+    async refreshLocalDownloads() {
+      const item = await this.$db.getLocalLibraryItemByLId(this.serverLibraryItemId)
+      if (item && !this.isLocal) this.$set(this.libraryItem, 'localLibraryItem', item)
+    },
     clickMissingButton() {
       Dialog.alert({
         title: this.$strings.LabelMissing,
@@ -819,6 +825,7 @@ export default {
     }
   },
   async mounted() {
+    this.$eventBus?.$on('refresh-local-downloads', this.refreshLocalDownloads)
     if (!this.libraryItem) {
       await this.loadServerLibraryItem()
     } else if (this.isLocal && (this.$route.query.noredirect === '1' || this.$route.query.localfallback !== '1')) {
@@ -833,6 +840,7 @@ export default {
     }
   },
   beforeDestroy() {
+    this.$eventBus?.$off('refresh-local-downloads', this.refreshLocalDownloads)
     window.removeEventListener('resize', this.windowResized)
     this.$eventBus.$off('library-changed', this.libraryChanged)
     this.$eventBus.$off('new-local-library-item', this.newLocalLibraryItem)

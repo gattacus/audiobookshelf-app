@@ -37,6 +37,7 @@ object DownloadServiceHost {
   private val deferredCompletions = Collections.synchronizedList(mutableListOf<JSObject>())
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
   private var restoreJob: Job? = null
+  private var backgroundOwners = 0
 
   @Synchronized
   fun ensure(context: Context): DownloadItemManager {
@@ -44,6 +45,14 @@ object DownloadServiceHost {
       val appContext = context.applicationContext
       DbManager.initialize(appContext)
       manager = DownloadItemManager(FolderScanner(appContext), appContext, ForwardingEmitter)
+      manager!!.setExecutionOwner(service != null || backgroundOwners > 0, service != null)
+      val connectivity = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+      connectivity.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+        override fun onCapabilitiesChanged(network: android.net.Network, capabilities: android.net.NetworkCapabilities) {
+          scope.launch { manager?.pauseDisallowed(); manager?.resumeWork(); com.audiobookshelf.app.listening.DownloadAutomation.schedule(appContext) }
+        }
+        override fun onLost(network: android.net.Network) { scope.launch { manager?.pauseDisallowed() } }
+      })
       restoreJob = scope.launch {
         try {
           if (DeviceManager.dbManager.ensureValidDownloadQueue()) {
@@ -122,6 +131,21 @@ object DownloadServiceHost {
     }
   }
 
+  suspend fun acquireBackground(context: Context) {
+    val queue = ensure(context)
+    restoreJob?.join()
+    synchronized(this) { backgroundOwners++; queue.setExecutionOwner(true, service != null) }
+  }
+  @Synchronized fun releaseBackground(context: Context) {
+    backgroundOwners = (backgroundOwners - 1).coerceAtLeast(0)
+    manager?.setExecutionOwner(service != null || backgroundOwners > 0, service != null)
+  }
+  fun hasAutomaticWork(context: Context): Boolean = ensure(context).downloadItemQueue.any { item ->
+    com.audiobookshelf.app.listening.ManagedDownloadStore.transfer(item) != null &&
+      com.audiobookshelf.app.listening.DownloadAutomation.allowed(context, item) &&
+      item.downloadItemParts.any { !it.moved && !it.failed }
+  }
+
   fun setNotificationStrings(
           context: Context,
           preparing: String,
@@ -156,13 +180,13 @@ object DownloadServiceHost {
   }
 
   fun attachService(downloadService: DownloadService) {
-    synchronized(this) { service = downloadService }
+    synchronized(this) { service = downloadService; manager?.setExecutionOwner(true, true) }
     startWork(downloadService)
   }
 
   @Synchronized
   fun detachService(downloadService: DownloadService) {
-    if (service === downloadService) service = null
+    if (service === downloadService) { service = null; manager?.setExecutionOwner(backgroundOwners > 0, false) }
   }
 
   fun startWork(context: Context) {
@@ -177,7 +201,7 @@ object DownloadServiceHost {
     val attachedService = synchronized(this) { service }
     if (attachedService != null) {
       manager?.resumeWork()
-    } else if (bridgeReady && manager?.hasWork() == true) {
+    } else if (bridgeReady && manager?.hasEligibleWork() == true) {
       startService(context)
     }
   }
@@ -202,7 +226,9 @@ object DownloadServiceHost {
       if (bridgeReady) bridgeEmitter.onDownloadItemComplete(jsobj) else deferredCompletions.add(jsobj)
     }
     override fun onQueueChanged(hasWork: Boolean) {
-      bridgeEmitter.onQueueChanged(hasWork)
+      // A service may have no eligible work while its execution owner is attaching
+      // or the network policy pauses it. Keep queued transfers visible/cancellable.
+      bridgeEmitter.onQueueChanged(manager?.hasWork() ?: hasWork)
       service?.onQueueChanged(hasWork)
     }
   }

@@ -281,7 +281,7 @@ class OfflineProgressSyncTest {
     val coordinator = OfflineSyncCoordinator()
     val order = mutableListOf<String>()
     var finishPush: ((Boolean, String?) -> Unit)? = null
-    var finishReconcile: (() -> Unit)? = null
+    var finishReconcile: ((Boolean, String?) -> Unit)? = null
     val results = mutableListOf<Pair<Boolean, String?>>()
 
     coordinator.sync(
@@ -309,7 +309,7 @@ class OfflineProgressSyncTest {
     assertEquals(listOf("push"), order)
     finishPush!!.invoke(true, null)
     assertEquals(listOf("push", "reconcile"), order)
-    finishReconcile!!.invoke()
+    finishReconcile!!.invoke(true, null)
     assertEquals(listOf(true to null, true to null), results)
   }
 

@@ -10,7 +10,7 @@ fi
 device_serial=$1
 app_package=com.audiobookshelf.app.debug
 test_package=com.audiobookshelf.app.debug.test
-classes=com.audiobookshelf.app.managers.DownloadQueueRecoveryTest,com.audiobookshelf.app.managers.DownloadStorageFailureTest,com.audiobookshelf.app.media.OfflineProgressSyncDeviceTest,com.audiobookshelf.app.media.OfflineSyncNetworkDeviceTest
+classes=com.audiobookshelf.app.managers.DownloadQueueRecoveryTest,com.audiobookshelf.app.managers.DownloadStorageFailureTest,com.audiobookshelf.app.media.OfflineProgressSyncDeviceTest,com.audiobookshelf.app.media.OfflineSyncNetworkDeviceTest,com.audiobookshelf.app.listening.ListeningStorageDeviceTest
 adb devices -l
 [[ $(adb -s "$device_serial" get-state) == device ]]
 adb -s "$device_serial" shell dumpsys package "$app_package" | awk '/versionCode=|versionName=|firstInstallTime=|lastUpdateTime=/'

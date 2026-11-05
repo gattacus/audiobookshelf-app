@@ -86,7 +86,7 @@ export default {
           console.log('Library item has local library item also', localLibraryItem.id)
           libraryItem.localLibraryItem = localLibraryItem
 
-          localEpisode = localLibraryItem.media.episodes.find((ep) => ep.serverEpisodeId === episodeId)
+          localEpisode = localLibraryItem.media.episodes.find((ep) => ep.serverEpisodeId === episodeId && ep.audioRemoved !== true)
         }
       }
     }
@@ -169,7 +169,7 @@ export default {
     },
     localEpisode() {
       if (this.isLocal) return this.episode
-      return this.episode.localEpisode
+      return this.episode.localEpisode?.audioRemoved === true ? null : this.episode.localEpisode
     },
     localEpisodeId() {
       if (this.localEpisode) return this.localEpisode.id

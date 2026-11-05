@@ -148,6 +148,7 @@
       </div>
     </div>
 
+    <nuxt-link v-if="$platform === 'android'" class="block underline py-3" to="/listening">Listening sync, automatic downloads &amp; cleanup</nuxt-link>
     <!-- Data settings -->
     <p class="uppercase text-xs font-semibold text-fg-muted mb-2 mt-10">{{ $strings.HeaderDataSettings }}</p>
     <div class="py-3 flex items-center">

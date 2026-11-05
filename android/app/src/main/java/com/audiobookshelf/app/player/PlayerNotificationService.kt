@@ -71,6 +71,7 @@ const val PLAYER_EXO = "exo-player"
 class PlayerNotificationService : MediaBrowserServiceCompat() {
 
   companion object {
+    @Volatile var preparedListeningIdentity: com.audiobookshelf.app.listening.ListeningIdentity? = null
     const val ACTION_PLAY_WIDGET_TARGET = "com.audiobookshelf.app.PLAY_WIDGET_TARGET"
     var widgetInstance: PlayerNotificationService? = null
       private set
@@ -250,6 +251,8 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
       Log.e(tag, "Error unregistering network listening callback $error")
     }
 
+    preparedListeningIdentity = null
+    playbackUndo.clear()
     Log.d(tag, "onDestroy")
     ItemPlaybackWidget.clearPlayback(this)
     widgetInstance = null
@@ -484,6 +487,9 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
           playbackRate: Float?
   ) {
     continuousPodcastPlayback.cancel()
+    com.audiobookshelf.app.listening.DownloadAutomation.rememberAnchor(playbackSession)
+    synchronized(com.audiobookshelf.app.listening.ListeningFileAccess.lock) { preparedListeningIdentity = com.audiobookshelf.app.listening.ListeningIdentity.from(playbackSession) }
+    playbackUndo.select(preparedListeningIdentity!!.key)
     if (!isStarted) {
       Log.i(tag, "preparePlayer: foreground service not started - Starting service --")
       Intent(ctx, PlayerNotificationService::class.java).also { intent ->
@@ -1009,6 +1015,27 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
     }
   }
 
+  val playbackUndo = com.audiobookshelf.app.listening.PlaybackUndo()
+  private fun listeningKey(): String? = currentPlaybackSession?.let { com.audiobookshelf.app.listening.ListeningIdentity.from(it).key }
+  var attributedSeekPending = false
+  fun explicitSeek(time: Long, source: String) {
+    val key = listeningKey() ?: return
+    val target = time.coerceIn(0, (getDuration() - 1).coerceAtLeast(0))
+    val previous = getCurrentTime()
+    if (previous == target) return
+    playbackUndo.record(key, previous, target, source, android.os.SystemClock.elapsedRealtime())
+    currentPlaybackSession?.let { com.audiobookshelf.app.media.MediaEventManager.explicitSeekEvent(it, previous / 1000.0, target / 1000.0, source) }
+    attributedSeekPending = true
+    seekPlayer(target)
+    com.audiobookshelf.app.listening.ProgressStatusStore.changed()
+  }
+  fun undoJump(generation: Long): Boolean {
+    val key = listeningKey() ?: return false
+    val target = playbackUndo.consume(key, generation) ?: return false
+    seekPlayer(target.coerceIn(0, (getDuration() - 1).coerceAtLeast(0)))
+    com.audiobookshelf.app.listening.ProgressStatusStore.changed()
+    return true
+  }
   fun seekPlayer(time: Long) {
     var timeToSeek = time
     Log.d(tag, "seekPlayer mediaCount = ${currentPlayer.mediaItemCount} | $timeToSeek")
@@ -1032,19 +1059,24 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
   }
 
   fun skipToPrevious() {
-    currentPlayer.seekToPrevious()
+    val session = currentPlaybackSession ?: return
+    val index = currentPlayer.currentMediaItemIndex
+    val target = if (getCurrentTime() - getCurrentTrackStartOffsetMs() > 3000) index else (index - 1).coerceAtLeast(0)
+    explicitSeek(session.getTrackStartOffsetMs(target), "media_track")
   }
 
   fun skipToNext() {
-    currentPlayer.seekToNext()
+    val session = currentPlaybackSession ?: return
+    val index = currentPlayer.currentMediaItemIndex + 1
+    if (index < session.audioTracks.size) explicitSeek(session.getTrackStartOffsetMs(index), "media_track")
   }
 
   fun jumpForward() {
-    seekForward(deviceSettings.jumpForwardTimeMs)
+    explicitSeek(getCurrentTime() + deviceSettings.jumpForwardTimeMs, "media_skip")
   }
 
   fun jumpBackward() {
-    seekBackward(deviceSettings.jumpBackwardsTimeMs)
+    explicitSeek(getCurrentTime() - deviceSettings.jumpBackwardsTimeMs, "media_skip")
   }
 
   fun seekForward(amount: Long) {
@@ -1064,6 +1096,9 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
   }
 
   fun closePlayback(calledOnError: Boolean? = false) {
+    playbackUndo.clear()
+    preparedListeningIdentity = null
+    com.audiobookshelf.app.listening.ProgressStatusStore.changed()
     continuousPodcastPlayback.cancel()
     Log.d(tag, "closePlayback")
     val config = DeviceManager.serverConnectionConfig

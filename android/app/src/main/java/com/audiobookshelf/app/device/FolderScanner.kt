@@ -227,7 +227,32 @@ class FolderScanner(private val ctx: Context) {
                       item.libraryItemId,
                       item.episodeId
               )
+      val existing = DeviceManager.dbManager.getAllLocalMediaProgress().filter {
+        it.serverConnectionConfigId == item.serverConnectionConfigId && it.serverUserId == item.serverUserId && it.libraryItemId == item.libraryItemId && it.episodeId.orEmpty() == item.episodeId.orEmpty()
+      }.maxByOrNull { it.lastUpdate }
+      if (existing != null && existing.lastUpdate >= progress.lastUpdate) {
+        val previousId = existing.id
+        existing.id = progressId
+        existing.localLibraryItemId = localItem.id
+        existing.localEpisodeId = localEpisodeId
+        DeviceManager.dbManager.saveLocalMediaProgress(existing)
+        if (previousId != existing.id) DeviceManager.dbManager.removeLocalMediaProgress(previousId)
+        result.localMediaProgress = existing
+      }
       DeviceManager.dbManager.saveLocalMediaProgress(result.localMediaProgress!!)
+    }
+    if (result.localMediaProgress == null) {
+      DeviceManager.dbManager.getAllLocalMediaProgress().find {
+        it.serverConnectionConfigId == item.serverConnectionConfigId && it.serverUserId == item.serverUserId && it.libraryItemId == item.libraryItemId && it.episodeId.orEmpty() == item.episodeId.orEmpty()
+      }?.let { progress ->
+        val previousId = progress.id
+        progress.id = if (localEpisodeId == null) localItem.id else "${localItem.id}-$localEpisodeId"
+        progress.localLibraryItemId = localItem.id
+        progress.localEpisodeId = localEpisodeId
+        result.localMediaProgress = progress
+        DeviceManager.dbManager.saveLocalMediaProgress(progress)
+        if (previousId != progress.id) DeviceManager.dbManager.removeLocalMediaProgress(previousId)
+      }
     }
     DeviceManager.dbManager.saveLocalLibraryItem(localItem)
     callback(result)
@@ -277,7 +302,12 @@ class FolderScanner(private val ctx: Context) {
 
   fun scanDownloadItem(item: DownloadItem, callback: (DownloadItemScanResult?) -> Unit) {
     if (item.isInternalStorage) {
-      val id = "local_${item.libraryItemId}"
+      val legacy = "local_${item.libraryItemId}"
+      val existing = DeviceManager.dbManager.getLocalLibraryItems().find {
+        it.libraryItemId == item.libraryItemId && it.serverConnectionConfigId == item.serverConnectionConfigId && it.serverUserId == item.serverUserId && it.folderId == item.localFolder.id
+      }
+      val legacyRecord = DeviceManager.dbManager.getLocalLibraryItem(legacy)
+      val id = existing?.id ?: if (legacyRecord == null) legacy else localLibraryItemId("${item.serverConnectionConfigId}:${item.serverUserId}:${item.libraryItemId}")
       val localItem =
               DeviceManager.dbManager.getLocalLibraryItem(id)
                       ?: newLocalLibraryItem(id, item, item.itemFolderPath, item.itemFolderPath, "")
@@ -297,7 +327,10 @@ class FolderScanner(private val ctx: Context) {
       callback(null)
       return
     }
-    val id = localLibraryItemId(itemFolder.id)
+    val legacy = localLibraryItemId(itemFolder.id)
+    val legacyRecord = DeviceManager.dbManager.getLocalLibraryItem(legacy)
+    val id = if (legacyRecord == null || (legacyRecord.serverConnectionConfigId == item.serverConnectionConfigId && legacyRecord.serverUserId == item.serverUserId && legacyRecord.libraryItemId == item.libraryItemId)) legacy
+      else localLibraryItemId("${item.serverConnectionConfigId}:${item.serverUserId}:${item.libraryItemId}:${itemFolder.id}")
     val localItem =
             DeviceManager.dbManager.getLocalLibraryItem(id)
                     ?: newLocalLibraryItem(

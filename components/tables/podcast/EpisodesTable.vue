@@ -229,7 +229,7 @@ export default {
     localEpisodeMap() {
       var epmap = {}
       this.localEpisodes.forEach((localEp) => {
-        if (localEp.serverEpisodeId) {
+        if (localEp.serverEpisodeId && localEp.audioRemoved !== true) {
           epmap[localEp.serverEpisodeId] = localEp
         }
       })

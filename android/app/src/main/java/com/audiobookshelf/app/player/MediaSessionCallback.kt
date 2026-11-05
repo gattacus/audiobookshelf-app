@@ -86,7 +86,7 @@ class MediaSessionCallback(var playerNotificationService:PlayerNotificationServi
 
   override fun onSeekTo(pos: Long) {
     val currentTrackStartOffset = playerNotificationService.getCurrentTrackStartOffsetMs()
-    playerNotificationService.seekPlayer(currentTrackStartOffset + pos)
+    playerNotificationService.explicitSeek(currentTrackStartOffset + pos, "media_timeline")
   }
 
   private fun onChangeSpeed() {

@@ -1,6 +1,7 @@
 <template>
   <div class="w-full h-full py-6 px-4 overflow-y-auto">
     <p class="mb-2 text-base text-fg">{{ $strings.HeaderDownloads }} ({{ localLibraryItems.length }})</p>
+    <nuxt-link v-if="$platform === 'android'" to="/listening" class="block underline mb-4">Clean up finished downloads · Listening &amp; downloads</nuxt-link>
 
     <div class="w-full">
       <template v-for="(mediaItem, num) in localLibraryItems">
@@ -19,7 +20,7 @@
               <span class="material-symbols text-2xl text-fg-muted">chevron_right</span>
             </div>
           </nuxt-link>
-          <div v-if="num + 1 < localLibraryItems.length" class="flex border-t border-fg/10 my-3" />
+    <div v-if="num + 1 < localLibraryItems.length" class="flex border-t border-fg/10 my-3" />
         </div>
       </template>
     </div>
@@ -61,7 +62,7 @@ export default {
     },
     async init() {
       var items = (await this.$db.getLocalLibraryItems()) || []
-      this.localLibraryItems = items.map((lmi) => {
+      this.localLibraryItems = items.filter(lmi => lmi.localFiles?.some(file => lmi.media?.tracks?.some(track => track.localFileId === file.id) || lmi.media?.episodes?.some(ep => ep.audioTrack?.localFileId === file.id) || lmi.media?.ebookFile?.localFileId === file.id)).map((lmi) => {
         console.log('Local library item', JSON.stringify(lmi))
         return {
           ...lmi,
@@ -73,10 +74,12 @@ export default {
   },
   mounted() {
     this.$eventBus.$on('new-local-library-item', this.newLocalLibraryItem)
+    this.$eventBus.$on('refresh-local-downloads', this.init)
     this.init()
   },
   beforeDestroy() {
     this.$eventBus.$off('new-local-library-item', this.newLocalLibraryItem)
+    this.$eventBus.$off('refresh-local-downloads', this.init)
   }
 }
 </script>

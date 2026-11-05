@@ -11,7 +11,7 @@
       <div v-for="(evt, index) in events" :key="index" class="py-3 flex items-center">
         <p class="text-sm text-fg-muted w-12">{{ $formatDate(evt.timestamp, 'HH:mm') }}</p>
         <span class="material-symbols fill px-2" :class="`text-${getEventColor(evt.name)}`">{{ getEventIcon(evt.name) }}</span>
-        <p class="text-sm text-fg px-1">{{ evt.name }}</p>
+        <p class="text-sm text-fg px-1">{{ evt.name }}<span v-if="evt.seekSource" class="text-xs text-fg-muted"> · {{ evt.seekSource }}<template v-if="evt.previousPosition != null"> from {{ $secondsToTimestampFull(evt.previousPosition) }}</template></span></p>
 
         <span v-if="evt.serverSyncAttempted && evt.serverSyncSuccess" class="material-symbols px-1 text-base text-success">cloud_done</span>
         <span v-if="evt.serverSyncAttempted && !evt.serverSyncSuccess" class="material-symbols px-1 text-base text-error">error_outline</span>
@@ -135,11 +135,14 @@ export default {
       await this.$hapticsImpact()
       this.playAtTime(time)
     },
-    playAtTime(startTime) {
+    async playAtTime(startTime) {
       this.$store.commit('setPlayerIsStartingPlayback', this.mediaItemEpisodeId || this.mediaItemLibraryItemId)
       // Server may have local
       const localProg = this.$store.getters['globals/getLocalMediaProgressByServerItemId'](this.mediaItemLibraryItemId, this.mediaItemEpisodeId)
-      if (localProg) {
+      const local = localProg ? await this.$db.getLocalLibraryItem(localProg.localLibraryItemId) : null
+      const localEpisode = local?.media?.episodes?.find(ep => ep.id === localProg?.localEpisodeId)
+      const playableLocal = local && (this.mediaItemEpisodeId ? localEpisode?.audioRemoved !== true && !!localEpisode?.audioTrack : local.media?.tracks?.length > 0)
+      if (localProg && playableLocal) {
         // Has local copy so prefer
         this.$eventBus.$emit('play-item', { libraryItemId: localProg.localLibraryItemId, episodeId: localProg.localEpisodeId, serverLibraryItemId: this.mediaItemLibraryItemId, serverEpisodeId: this.mediaItemEpisodeId, startTime })
       } else {

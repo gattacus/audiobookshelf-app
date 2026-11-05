@@ -238,7 +238,7 @@ export default {
       return this.localFiles.find((lf) => lf.id == this.ebookFile.localFileId)
     },
     episodes() {
-      return this.media?.episodes || []
+      return (this.media?.episodes || []).filter(ep => ep.audioRemoved !== true)
     },
     selectedEpisodes() {
       return this.episodes.filter((episode) => this.selectedEpisodeIds.includes(episode.id))
@@ -251,7 +251,7 @@ export default {
       if (this.mediaType == 'book') {
         return this.media.tracks || []
       } else {
-        return (this.media.episodes || []).map((ep) => ep.audioTrack)
+        return (this.media.episodes || []).map((ep) => ep.audioTrack).filter(Boolean)
       }
     },
     dialogItems() {

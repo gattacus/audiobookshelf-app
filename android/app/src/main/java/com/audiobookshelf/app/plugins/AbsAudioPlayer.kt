@@ -329,6 +329,18 @@ class AbsAudioPlayer : Plugin() {
     val playWhenReady = call.getBoolean("playWhenReady") == true
     val playbackRate = call.getFloat("playbackRate",1f) ?: 1f
     val startTimeOverride = call.getDouble("startTime")
+    val active = playerNotificationService.currentPlaybackSession
+    val sameItem = active != null && (active.libraryItemId == libraryItemId || active.localLibraryItem?.id == libraryItemId) &&
+      (active.episodeId.orEmpty() == episodeId || active.localEpisodeId.orEmpty() == episodeId)
+    if (startTimeOverride != null && sameItem) {
+      Handler(Looper.getMainLooper()).post {
+        if (playerNotificationService.currentPlaybackSession?.let { com.audiobookshelf.app.listening.ListeningIdentity.from(it) } != com.audiobookshelf.app.listening.ListeningIdentity.from(active!!)) return@post call.reject("Playback item changed")
+        playerNotificationService.explicitSeek((startTimeOverride * 1000).toLong(), "history")
+        call.resolve(JSObject())
+      }
+      return
+    }
+
 
     AbsLogger.info("AbsAudioPlayer", "prepareLibraryItem: lid=$libraryItemId, startTimeOverride=$startTimeOverride, playbackRate=$playbackRate")
 
@@ -445,9 +457,12 @@ class AbsAudioPlayer : Plugin() {
   @PluginMethod
   fun seek(call: PluginCall) {
     val time: Double = call.getDouble("value", 0.0) ?: 0.0 // Value in seconds, fractional
+    if (!time.isFinite()) return call.reject("Invalid playback position")
+    val expectedSession = call.getString("sessionId")
     Log.d(tag, "seek action to $time")
     Handler(Looper.getMainLooper()).post {
-      playerNotificationService.seekPlayer((time * 1000L).toLong())
+      if (expectedSession != null && playerNotificationService.currentPlaybackSession?.id != expectedSession) return@post call.reject("Playback item changed")
+      playerNotificationService.explicitSeek((time * 1000L).toLong(), call.getString("source") ?: "timeline")
       call.resolve()
     }
   }
@@ -456,7 +471,7 @@ class AbsAudioPlayer : Plugin() {
   fun seekForward(call: PluginCall) {
     val amount:Int = call.getInt("value", 0) ?: 0
     Handler(Looper.getMainLooper()).post {
-      playerNotificationService.seekForward(amount * 1000L) // convert to ms
+      playerNotificationService.explicitSeek(playerNotificationService.getCurrentTime() + amount * 1000L, "skip") // convert to ms
       call.resolve()
     }
   }
@@ -465,7 +480,7 @@ class AbsAudioPlayer : Plugin() {
   fun seekBackward(call: PluginCall) {
     val amount:Int = call.getInt("value", 0) ?: 0 // Value in seconds
     Handler(Looper.getMainLooper()).post {
-      playerNotificationService.seekBackward(amount * 1000L) // convert to ms
+      playerNotificationService.explicitSeek(playerNotificationService.getCurrentTime() - amount * 1000L, "skip") // convert to ms
       call.resolve()
     }
   }

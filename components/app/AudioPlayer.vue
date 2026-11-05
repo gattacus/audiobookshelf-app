@@ -59,6 +59,7 @@
         <p class="title-text whitespace-nowrap"></p>
       </div>
       <p class="author-text text-fg text-opacity-75 truncate">{{ authorName }}</p>
+      <widgets-listening-status v-if="$platform === 'android' && showFullscreen" @open-management="collapseFullscreen" />
     </div>
 
     <div id="playerContent" class="playerContainer w-full z-20 absolute bottom-0 left-0 right-0 p-2 pointer-events-auto transition-all" :style="{ backgroundColor: showFullscreen ? '' : coverRgb }" @click="clickContainer">
@@ -125,13 +126,17 @@
     <!-- Chapters modal - lists chapters for navigation -->
     <modals-chapters-modal v-model="showChapterModal" :current-chapter="currentChapter" :chapters="chapters" :playback-rate="currentPlaybackRate" @select="selectChapter" />
     <!-- More menu dialog - player settings and options -->
+    <div v-if="$platform === 'android' && undoBanner && undoJump" class="player-undo-banner absolute left-4 right-4 z-40 bg-bg text-fg rounded-lg border border-border px-3 pointer-events-auto shadow-xl flex items-center justify-between" role="status" @click.stop>
+      <span class="min-w-0 py-2">Playback position changed</span>
+      <button type="button" class="underline font-semibold ml-3 flex-shrink-0 px-2" style="min-height: 44px" @click="performUndo">Undo</button>
+    </div>
     <modals-dialog v-model="showMoreMenuDialog" :items="menuItems" width="80vw" @action="clickMenuAction" />
   </div>
 </template>
 
 <script>
 import { Capacitor } from '@capacitor/core'
-import { AbsAudioPlayer } from '@/plugins/capacitor'
+import { AbsListening, AbsAudioPlayer } from '@/plugins/capacitor'
 import { Dialog } from '@capacitor/dialog'
 import { getAverageColorFromCoverUrl } from '@/utils/coverAverageColor'
 import WrappingMarquee from '@/assets/WrappingMarquee.js'
@@ -187,6 +192,10 @@ export default {
       coverRgb: 'rgb(55, 56, 56)',
       coverBgIsLight: false,
       titleMarquee: null,
+      undoJump: null,
+      listeningListener: null,
+      undoBanner: false,
+      undoTimer: null,
       isRefreshingUI: false
     }
   },
@@ -209,6 +218,7 @@ export default {
     },
     menuItems() {
       const items = []
+      if (this.$platform === 'android' && this.undoJump) items.push({ text: 'Undo last jump', value: 'undo_jump', icon: 'undo' })
       // TODO: Implement on iOS
       if (this.$platform !== 'ios' && !this.isPodcast && this.mediaId) {
         items.push({
@@ -420,6 +430,20 @@ export default {
     }
   },
   methods: {
+    async refreshUndo() {
+      const { jump } = await AbsListening.getUndo()
+      if (jump?.generation !== this.undoJump?.generation) {
+        clearTimeout(this.undoTimer)
+        this.undoBanner = !!jump
+        this.undoTimer = setTimeout(() => { this.undoBanner = false }, 10000)
+      }
+      this.undoJump = jump
+    },
+    async performUndo() {
+      if (!this.undoJump) return
+      try { await AbsListening.undoJump({ generation: this.undoJump.generation }); await this.refreshUndo() }
+      catch (e) { this.$toast.error(e.message) }
+    },
     showSyncsFailedDialog() {
       Dialog.alert({
         title: this.$strings.HeaderProgressSyncFailed,
@@ -452,7 +476,7 @@ export default {
     },
     async selectChapter(chapter) {
       await this.$hapticsImpact()
-      this.seek(chapter.start)
+      this.seek(chapter.start, 'chapter')
       this.showChapterModal = false
     },
     async castClick() {
@@ -484,7 +508,7 @@ export default {
       await this.$hapticsImpact()
       if (this.showLoadingState) return
       if (!this.nextChapter) return
-      this.seek(this.nextChapter.start)
+      this.seek(this.nextChapter.start, 'chapter')
     },
     async jumpChapterStart() {
       await this.$hapticsImpact()
@@ -498,10 +522,10 @@ export default {
         const currChapterIndex = this.chapters.findIndex((ch) => Number(ch.start) <= this.currentTime && Number(ch.end) >= this.currentTime)
         if (currChapterIndex > 0) {
           const prevChapter = this.chapters[currChapterIndex - 1]
-          this.seek(prevChapter.start)
+          this.seek(prevChapter.start, 'chapter')
         }
       } else {
-        this.seek(this.currentChapter.start)
+        this.seek(this.currentChapter.start, 'chapter')
       }
     },
     showSleepTimerModal() {
@@ -634,7 +658,7 @@ export default {
         if (this.$refs.totalBufferedTrack) this.$refs.totalBufferedTrack.style.width = totalBufferedPercent * 100 + '%'
       }
     },
-    seek(time) {
+    seek(time, source = 'timeline') {
       if (this.showLoadingState) return
       if (this.seekLoading) {
         console.error('Already seek loading', this.seekedTime)
@@ -646,7 +670,7 @@ export default {
       this.serverProgressRevision++
 
       // Pass fractional seconds so seeks to non-integer chapter starts don't truncate
-      AbsAudioPlayer.seek({ value: time })
+      AbsAudioPlayer.seek({ value: time, source, sessionId: this.playbackSession?.id })
 
       if (this.$refs.playedTrack) {
         const perc = time / this.totalDuration
@@ -773,7 +797,9 @@ export default {
       await this.$hapticsImpact()
       this.showMoreMenuDialog = false
       this.$nextTick(() => {
-        if (action === 'history') {
+        if (action === 'undo_jump') {
+          this.performUndo()
+        } else if (action === 'history') {
           this.$router.push(`/media/${this.mediaId}/history?title=${this.title}`)
           this.showFullscreen = false
         } else if (action === 'scale_elapsed_time') {
@@ -1021,6 +1047,10 @@ export default {
     }
   },
   mounted() {
+    if (this.$platform === 'android') {
+      AbsListening.addListener('onListeningStateChanged', this.refreshUndo).then(listener => { this.listeningListener = listener })
+      this.refreshUndo()
+    }
     this.updateScreenSize()
     if (screen.orientation) {
       // Not available on ios
@@ -1037,6 +1067,8 @@ export default {
     this.$nextTick(this.init)
   },
   beforeDestroy() {
+    this.listeningListener?.remove()
+    clearTimeout(this.undoTimer)
     if (screen.orientation) {
       // Not available on ios
       screen.orientation.removeEventListener('change', this.screenOrientationChange)
@@ -1080,7 +1112,17 @@ export default {
 .fullscreen .playerContainer {
   height: 200px;
 }
+.player-undo-banner {
+  bottom: 128px;
+}
+.fullscreen .player-undo-banner {
+  top: 72px;
+  bottom: auto;
+}
 @media (orientation: landscape) {
+  .fullscreen .player-undo-banner {
+    right: calc(50% + 16px);
+  }
   .fullscreen .playerContainer {
     width: 50%;
     left: 50%;

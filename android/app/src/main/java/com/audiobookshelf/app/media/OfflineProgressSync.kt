@@ -222,7 +222,7 @@ internal class OfflineSyncCoordinator {
   fun sync(
     serverConfigId: String?,
     pushSessions: ((Boolean, String?) -> Unit) -> Unit,
-    reconcileProgress: (() -> Unit) -> Unit,
+    reconcileProgress: ((Boolean, String?) -> Unit) -> Unit,
     onComplete: (Boolean, String?) -> Unit
   ) {
     if (serverConfigId.isNullOrBlank()) {
@@ -240,8 +240,8 @@ internal class OfflineSyncCoordinator {
       } else {
         // Different server config while another is running: execute independently and complete its own caller.
         pushSessions { pushOk, pushErr ->
-          reconcileProgress {
-            onComplete(pushOk, pushErr)
+          reconcileProgress { reconcileOk, reconcileErr ->
+            onComplete(pushOk && reconcileOk, pushErr ?: reconcileErr)
           }
         }
         return
@@ -259,8 +259,8 @@ internal class OfflineSyncCoordinator {
     }
 
     pushSessions { pushOk, pushErr ->
-      reconcileProgress {
-        finishAll(pushOk, pushErr)
+      reconcileProgress { reconcileOk, reconcileErr ->
+        finishAll(pushOk && reconcileOk, pushErr ?: reconcileErr)
       }
     }
   }

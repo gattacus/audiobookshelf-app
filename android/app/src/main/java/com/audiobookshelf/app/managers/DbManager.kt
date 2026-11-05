@@ -3,10 +3,13 @@ package com.audiobookshelf.app.managers
 import android.content.Context
 import android.util.Log
 import com.audiobookshelf.app.data.*
+import com.audiobookshelf.app.device.DeviceManager
 import com.audiobookshelf.app.models.DownloadItem
 import com.audiobookshelf.app.plugins.AbsLog
 import com.audiobookshelf.app.plugins.AbsLogger
 import io.paperdb.Paper
+import com.audiobookshelf.app.listening.ListeningIdentity
+import com.audiobookshelf.app.listening.ProgressStatusStore
 import java.util.UUID
 
 class DbManager {
@@ -14,9 +17,12 @@ class DbManager {
 
   companion object {
     private var isDbInitialized = false
+    var applicationContext: Context? = null
+      private set
 
     fun initialize(ctx: Context) {
       if (isDbInitialized) return
+      applicationContext = ctx.applicationContext
       Paper.init(ctx)
       isDbInitialized = true
       Log.i("DbManager", "Initialized Paper db")
@@ -50,7 +56,8 @@ class DbManager {
   }
 
   fun getLocalLibraryItemByLId(libraryItemId: String): LocalLibraryItem? {
-    return getLocalLibraryItems().find { it.libraryItemId == libraryItemId }
+    val config = DeviceManager.serverConnectionConfig
+    return getLocalLibraryItems().firstOrNull { it.libraryItemId == libraryItemId && (config == null || it.serverConnectionConfigId == config.id && it.serverUserId == config.userId) }
   }
 
   fun getLocalLibraryItem(localLibraryItemId: String): LocalLibraryItem? {
@@ -233,7 +240,13 @@ class DbManager {
   }
 
   fun saveLocalMediaProgress(mediaProgress: LocalMediaProgress) {
-    Paper.book("localMediaProgress").write(mediaProgress.id, mediaProgress)
+    synchronized(com.audiobookshelf.app.listening.ListeningFileAccess.lock) {
+      ProgressStatusStore.persist(ListeningIdentity.from(mediaProgress), mediaProgress.lastUpdate, mediaProgress.currentTime, mediaProgress.isFinished) {
+        Paper.book("localMediaProgress").write(mediaProgress.id, mediaProgress)
+      }
+      if (!mediaProgress.isFinished) com.audiobookshelf.app.listening.ManagedDownloadStore.firstFinished(ListeningIdentity.from(mediaProgress), false, null)
+      if (mediaProgress.isFinished) applicationContext?.let { com.audiobookshelf.app.listening.DownloadAutomation.schedule(it) }
+    }
   }
   // For books this will just be the localLibraryItemId for podcast episodes this will be
   // "{localLibraryItemId}-{episodeId}"
@@ -278,7 +291,7 @@ class DbManager {
                   )
                   hasUpdates = true
                 }
-                exists
+                exists || com.audiobookshelf.app.listening.ManagedDownloadStore.retains(lli.id) && com.audiobookshelf.app.listening.ManagedDownloadStore.audio().any { it.localItemId == lli.id && it.fileId == localFile.id && it.deleting }
               } as
                       MutableList<LocalFile>
 
@@ -294,7 +307,7 @@ class DbManager {
                     )
                     hasUpdates = true
                   }
-                  ep.audioTrack != null &&
+                  com.audiobookshelf.app.listening.ManagedDownloadStore.retains(lli.id, ep.id) || ep.audioTrack != null &&
                           lli.localFiles.find { lf -> lf.id == ep.audioTrack?.localFileId } != null
                 } as
                         MutableList<PodcastEpisode>
@@ -357,20 +370,20 @@ class DbManager {
                 "cleanLocalMediaProgress: Invalid local media progress does not start with 'local' (fixed on server 2.0.24)"
         )
         Paper.book("localMediaProgress").delete(it.id)
-      } else if (matchingLLI == null) {
+      } else if (matchingLLI == null && !com.audiobookshelf.app.listening.ManagedDownloadStore.retains(it.localLibraryItemId, it.localEpisodeId)) {
         Log.d(
                 tag,
                 "cleanLocalMediaProgress: No matching local library item for local media progress ${it.id} - removing"
         )
         Paper.book("localMediaProgress").delete(it.id)
-      } else if (matchingLLI.isPodcast) {
+      } else if (matchingLLI?.isPodcast == true) {
         if (it.localEpisodeId.isNullOrEmpty()) {
           Log.d(tag, "cleanLocalMediaProgress: Podcast media progress has no episode id - removing")
           Paper.book("localMediaProgress").delete(it.id)
         } else {
           val podcast = matchingLLI.media as Podcast
           val matchingLEp = podcast.episodes?.find { ep -> ep.id == it.localEpisodeId }
-          if (matchingLEp == null) {
+          if (matchingLEp == null && !com.audiobookshelf.app.listening.ManagedDownloadStore.retains(it.localLibraryItemId, it.localEpisodeId)) {
             Log.d(
                     tag,
                     "cleanLocalMediaProgress: Podcast media progress for episode ${it.localEpisodeId} not found - removing"
@@ -390,7 +403,12 @@ class DbManager {
   }
 
   fun savePlaybackSession(playbackSession: PlaybackSession) {
-    Paper.book("playbackSession").write(playbackSession.id, playbackSession)
+    synchronized(com.audiobookshelf.app.listening.ListeningFileAccess.lock) {
+      com.audiobookshelf.app.listening.DownloadAutomation.rememberAnchor(playbackSession)
+      ProgressStatusStore.persist(ListeningIdentity.from(playbackSession), playbackSession.updatedAt, playbackSession.currentTime, playbackSession.progress >= 0.99, playbackSession.displayTitle.orEmpty()) {
+        Paper.book("playbackSession").write(playbackSession.id, playbackSession)
+      }
+    }
   }
   fun getPlaybackSession(playbackSessionId: String): PlaybackSession? {
     return runCatching { Paper.book("playbackSession").read<PlaybackSession>(playbackSessionId) }
@@ -399,6 +417,7 @@ class DbManager {
   }
   fun removePlaybackSession(playbackSessionId: String) {
     Paper.book("playbackSession").delete(playbackSessionId)
+    ProgressStatusStore.changed()
   }
   fun getPlaybackSessions(): List<PlaybackSession> {
     val sessions: MutableList<PlaybackSession> = mutableListOf()

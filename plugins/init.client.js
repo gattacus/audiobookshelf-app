@@ -2,7 +2,7 @@ import Vue from 'vue'
 import vClickOutside from 'v-click-outside'
 import { App } from '@capacitor/app'
 import { Dialog } from '@capacitor/dialog'
-import { AbsFileSystem } from '@/plugins/capacitor'
+import { AbsListening, AbsFileSystem } from '@/plugins/capacitor'
 import { StatusBar, Style } from '@capacitor/status-bar'
 import { Clipboard } from '@capacitor/clipboard'
 import { Capacitor } from '@capacitor/core'
@@ -271,6 +271,10 @@ function isValidVersion(currentVersion, minVersion) {
 export default ({ store, app }, inject) => {
   const eventBus = new Vue()
   inject('eventBus', eventBus)
+  if (Capacitor.getPlatform() === 'android') {
+    AbsListening.addListener('onDownloadAvailabilityChanged', () => eventBus.$emit('refresh-local-downloads'))
+    App.addListener('appStateChange', ({ isActive }) => { if (isActive) eventBus.$emit('refresh-local-downloads') })
+  }
 
   inject('isValidVersion', isValidVersion)
 
