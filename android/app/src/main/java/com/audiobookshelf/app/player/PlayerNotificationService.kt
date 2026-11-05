@@ -57,7 +57,6 @@ import com.google.android.exoplayer2.source.hls.HlsMediaSource
 import com.google.android.exoplayer2.ui.PlayerNotificationManager
 import com.google.android.exoplayer2.upstream.*
 import java.util.*
-import kotlin.concurrent.schedule
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -136,11 +135,26 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
   private var isAndroidAuto = false
 
   // The following are used for the shake detection
-  private var isShakeSensorRegistered: Boolean = false
   private var mSensorManager: SensorManager? = null
   private var mAccelerometer: Sensor? = null
   private var mShakeDetector: ShakeDetector? = null
-  private var shakeSensorUnregisterTask: TimerTask? = null
+  private val shakeSensorHandler = Handler(Looper.getMainLooper())
+  private val shakeSensorRegistration = ShakeSensorRegistration(
+    registerListener = {
+      Log.d(tag, "Registering shake SENSOR ${mAccelerometer?.isWakeUpSensor}")
+      mSensorManager!!.registerListener(mShakeDetector, mAccelerometer, SensorManager.SENSOR_DELAY_UI)
+    },
+    unregisterListener = {
+      Log.d(tag, "Unregistering shake sensor")
+      mSensorManager!!.unregisterListener(mShakeDetector)
+    },
+    scheduleCleanup = { cleanup ->
+      val callback = Runnable { cleanup() }
+      shakeSensorHandler.postDelayed(callback, SLEEP_TIMER_WAKE_UP_EXPIRATION)
+      val cancel = { shakeSensorHandler.removeCallbacks(callback) }
+      cancel
+    }
+  )
 
   // These are used to trigger reloading if
   private var forceReloadingAndroidAuto: Boolean = false
@@ -223,6 +237,7 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
 
   // detach player
   override fun onDestroy() {
+    shakeSensorRegistration.unregisterNow()
     continuousPodcastPlayback.cancel()
     widgetPlayback.cancel()
     androidAutoBrowseDestroyed = true
@@ -2080,35 +2095,11 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
 
   // Shake sensor used for sleep timer
   fun registerSensor() {
-    if (isShakeSensorRegistered) {
-      Log.i(tag, "Shake sensor already registered")
-      return
-    }
-    shakeSensorUnregisterTask?.cancel()
-
-    Log.d(tag, "Registering shake SENSOR ${mAccelerometer?.isWakeUpSensor}")
-    val success =
-            mSensorManager!!.registerListener(
-                    mShakeDetector,
-                    mAccelerometer,
-                    SensorManager.SENSOR_DELAY_UI
-            )
-    if (success) isShakeSensorRegistered = true
+    shakeSensorRegistration.register()
   }
 
   fun unregisterSensor() {
-    if (!isShakeSensorRegistered) return
-
-    // Unregister shake sensor after wake up expiration
-    shakeSensorUnregisterTask?.cancel()
-    shakeSensorUnregisterTask =
-            Timer("ShakeUnregisterTimer", false).schedule(SLEEP_TIMER_WAKE_UP_EXPIRATION) {
-              Handler(Looper.getMainLooper()).post {
-                Log.d(tag, "wake time expired: Unregistering shake sensor")
-                mSensorManager!!.unregisterListener(mShakeDetector)
-                isShakeSensorRegistered = false
-              }
-            }
+    shakeSensorRegistration.unregisterAfterGracePeriod()
   }
 
   private val networkCallback =
