@@ -52,6 +52,7 @@ class MainActivity : BridgeActivity() {
 
     super.onCreate(savedInstanceState)
     Log.d(tag, "onCreate")
+    ItemPlaybackWidget.refresh(applicationContext)
 
     // Update the margins to handle edge-to-edge enforced in SDK 35
     // See: https://developer.android.com/develop/ui/views/layout/edge-to-edge

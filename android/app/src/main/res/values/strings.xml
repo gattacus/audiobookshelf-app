@@ -10,7 +10,7 @@
     <string name="item_widget_unconfigured">Choose a book or podcast in Audiobookshelf</string>
     <string name="item_widget_play">Play %1$s</string>
     <string name="item_widget_starting">Starting %1$s</string>
-    <string name="item_widget_playing">Playing %1$s</string>
+    <string name="item_widget_playing">Pause %1$s</string>
     <string name="item_widget_failed">Could not play %1$s</string>
     <string name="action_jump_forward">Jump Forward</string>
     <string name="action_jump_backward">Jump Backward</string>

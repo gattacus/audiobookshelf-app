@@ -10,7 +10,10 @@ import com.audiobookshelf.app.ItemPlaybackWidget
 
 //const val PAUSE_LEN_BEFORE_RECHECK = 30000 // 30 seconds
 
-class PlayerListener(var playerNotificationService:PlayerNotificationService) : Player.Listener {
+class PlayerListener(
+  var playerNotificationService: PlayerNotificationService,
+  private val updateItemWidgets: () -> Unit = { ItemPlaybackWidget.syncPlayback(playerNotificationService) }
+) : Player.Listener {
   var tag = "PlayerListener"
 
   companion object {
@@ -117,11 +120,17 @@ class PlayerListener(var playerNotificationService:PlayerNotificationService) : 
     }
 
     playerNotificationService.clientEventEmitter?.onPlayingUpdate(isPlaying)
-    ItemPlaybackWidget.syncPlayback(playerNotificationService)
   }
 
   override fun onEvents(player: Player, events: Player.Events) {
     Log.d(tag, "onEvents ${playerNotificationService.getMediaPlayer()} | ${events.size()}")
+
+    // Read the final state after individual callbacks (including auto-rewind seeks).
+    // Playback/progress guards in onIsPlayingChanged must not suppress widget feedback.
+    if (events.containsAny(Player.EVENT_IS_PLAYING_CHANGED, Player.EVENT_PLAYBACK_STATE_CHANGED,
+        Player.EVENT_MEDIA_ITEM_TRANSITION)) {
+      updateItemWidgets()
+    }
 
     if (events.contains(Player.EVENT_POSITION_DISCONTINUITY)) {
       Log.d(tag, "EVENT_POSITION_DISCONTINUITY")

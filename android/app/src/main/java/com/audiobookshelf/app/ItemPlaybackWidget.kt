@@ -105,6 +105,8 @@ class ItemPlaybackWidget : AppWidgetProvider() {
     private fun widgetIds(context: Context): IntArray = AppWidgetManager.getInstance(context)
       .getAppWidgetIds(ComponentName(context, ItemPlaybackWidget::class.java))
 
+    fun refresh(context: Context) = widgetIds(context).forEach { update(context, it) }
+
     private fun applyFeedback(context: Context, views: RemoteViews, target: WidgetTarget?, state: WidgetFeedback) {
       val description = when (state) {
         WidgetFeedback.STARTING -> R.string.item_widget_starting
@@ -201,8 +203,11 @@ class ItemPlaybackWidget : AppWidgetProvider() {
 
       if (target == null) return
       DbManager.initialize(context)
-      val local = target.localItemId?.let { runCatching { DeviceManager.dbManager.getLocalLibraryItem(it) }.getOrNull() }
-      val cover: Any? = if (!local?.coverContentUrl.isNullOrBlank()) local?.getCoverUri(context) else if (target.hasCover) {
+      val local = WidgetLocalItemResolver.resolve(target,
+        runCatching { DeviceManager.dbManager.getLocalLibraryItems(target.mediaType) }.getOrDefault(mutableListOf()))
+      val localCover = local?.takeIf { !it.coverContentUrl.isNullOrBlank() }
+        ?.let { runCatching { it.getCoverUri(context) }.getOrNull() }
+      val cover: Any? = localCover ?: if (target.hasCover) {
         val config = DeviceManager.deviceData.serverConnectionConfigs.find { it.id == target.serverConfigId }
         if (config != null && target.serverItemId != null) {
           GlideUrl("${config.address}/api/items/${target.serverItemId}/cover",
@@ -228,6 +233,10 @@ class ItemPlaybackWidget : AppWidgetProvider() {
   }
 
   override fun onReceive(context: Context, intent: Intent) {
+    if (intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) {
+      refresh(context)
+      return
+    }
     if (intent.action == ACTION_STATUS_TIMEOUT) {
       val id = intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
       if (id == AppWidgetManager.INVALID_APPWIDGET_ID || WidgetTargetStore.get(context, id) == null) return

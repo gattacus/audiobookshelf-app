@@ -190,7 +190,6 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
             .build()
           startForeground(notificationId, notification)
         }
-        ItemPlaybackWidget.showStarting(this, widgetId)
         widgetPlayback.play(target, widgetId)
       } else {
         finishWidgetStartup()

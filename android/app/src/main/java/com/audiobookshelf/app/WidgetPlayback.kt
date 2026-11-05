@@ -14,8 +14,11 @@ import com.audiobookshelf.app.player.PlayerNotificationService
 import com.google.android.exoplayer2.Player
 
 /** Playback entry point for a widget tap. All work uses the widget's own saved identity. */
-internal class WidgetPlayback(private val service: PlayerNotificationService) {
-  private val db = DeviceManager.dbManager
+internal class WidgetPlayback(
+  private val service: PlayerNotificationService,
+  private val updateItemWidgets: () -> Unit = { ItemPlaybackWidget.syncPlayback(service) }
+) {
+  private val db get() = DeviceManager.dbManager
   private val handler = Handler(Looper.getMainLooper())
   private val requests = WidgetPlaybackRequests()
   private var widgetId = AppWidgetManager.INVALID_APPWIDGET_ID
@@ -32,14 +35,14 @@ internal class WidgetPlayback(private val service: PlayerNotificationService) {
       service.currentPlayer.playbackState != Player.STATE_ENDED &&
       WidgetTargetMatcher.matches(target, active.mediaType, active.libraryItemId,
         active.serverConnectionConfigId, active.localLibraryItem?.id)) {
-      if (!service.currentPlayer.isPlaying) service.play()
-      else ItemPlaybackWidget.syncPlayback(service)
+      service.playPause()
+      updateItemWidgets()
       return
     }
-    val local = target.localItemId?.let { runCatching { db.getLocalLibraryItem(it) }.getOrNull() }?.takeIf {
-      it.mediaType == target.mediaType && (target.serverItemId == null ||
-        (it.libraryItemId == target.serverItemId && it.serverConnectionConfigId == target.serverConfigId))
-    }
+    // Only a new playback request is starting; toggling the active item must clear to idle on pause.
+    ItemPlaybackWidget.showStarting(service, id)
+    val local = WidgetLocalItemResolver.resolve(target,
+      runCatching { db.getLocalLibraryItems(target.mediaType) }.getOrDefault(mutableListOf()))
     if (target.mediaType == "book") {
       if (local != null && safeHasTracks(local, null) && prepareLocal(local, null, currentRequest)) {
         return
