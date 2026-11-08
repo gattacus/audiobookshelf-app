@@ -11,6 +11,43 @@ The tests execute the real HTTP plugins, Vuex refresh/logout actions, Socket.IO
 wrapper and layout recovery hooks with isolated in-memory transport, storage and
 timer fixtures. They never inject credentials or fixtures into the phone database.
 
+Native Android recovery regressions run with the Gradle wrapper:
+
+```sh
+./android/gradlew :app:testDebugUnitTest -p android --no-daemon
+```
+
+`TokenRefreshRequestTest` uses isolated loopback HTTP servers to reproduce a
+truncated successful renewal response, then renew with the original credential.
+It also checks transport errors, temporary HTTP errors, malformed responses,
+explicit rejection and omitted token rotation. `TokenRefreshRetryTest` covers
+independent scheduled retries, credential changes/removal, successful renewal,
+explicit rejection and retry exhaustion across newly created retry runners.
+On 2026-11-07, all 95 app JVM tests passed, including these 15 native auth tests,
+and debug assembly succeeded. The subsequent in-place phone update preserved the
+original installation timestamp, all 7 local-item records, 2 folder records and
+41 progress records. Library/folder records were byte-for-byte unchanged, and the
+app authorized its saved session and authenticated its socket without another
+login. No renewal fault was injected into the active account; background retry
+timing and process-restart recovery still require an isolated device flow check.
+
+Native transient renewal failures enqueue unique WorkManager work for the saved
+server and credential fingerprint. Work requires connectivity, starts without an
+initial delay and retries with exponential backoff starting at 10 seconds, up to
+eight attempts. WorkManager persists the task across process restarts and handles
+connectivity restoration while the UI is closed. Android may defer background
+work, including during Doze; these are scheduling targets, not timing guarantees.
+The worker bounds each renewal call to 20 seconds and stops when another renewal
+or login replaces the credential, the account is removed, or renewal is rejected.
+Exhaustion preserves credentials. Work data contains a SHA-256 fingerprint rather
+than another copy of the refresh token. No server grace-period setting is changed.
+
+For a device check, use an isolated test account/installation: interrupt a native
+renewal response, background the UI while playback continues, and confirm the
+`TokenRefreshRetry` log appears and the session renews without another API trigger.
+Repeat offline/online and process-restart cases. Never send deliberate refresh
+rejections or inject persisted work/credentials into the user's active account.
+
 ## Confirmed causes and intended behavior
 
 Previously, native HTTP and Axios logged out and cleared the saved refresh token
