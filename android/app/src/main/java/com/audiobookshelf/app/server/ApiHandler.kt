@@ -185,10 +185,10 @@ class ApiHandler(var ctx:Context) {
   private fun handleTokenRefresh(originalRequest: Request, httpClient: OkHttpClient?, callback: (JSObject) -> Unit, config: ServerConnectionConfig? = null) {
     val serverConnectionConfigId = config?.id ?: DeviceManager.serverConnectionConfigId
     refreshAuthTokens(serverConnectionConfigId, httpClient) { result ->
-      if (result is RefreshResult.Success) {
-        retryOriginalRequest(originalRequest, result.accessToken, httpClient, callback)
-      } else {
-        callback(JSObject().put("error", "Authentication failed - login again"))
+      when (result) {
+        is RefreshResult.Success -> retryOriginalRequest(originalRequest, result.accessToken, httpClient, callback)
+        RefreshResult.Rejected -> callback(JSObject().put("error", "Authentication failed - login again"))
+        RefreshResult.Transient -> callback(JSObject().put("error", "Token renewal temporarily unavailable; retrying in background"))
       }
     }
   }
@@ -207,6 +207,7 @@ class ApiHandler(var ctx:Context) {
   fun refreshAuthTokens(
           serverConnectionConfigId: String,
           httpClient: OkHttpClient? = null,
+          retryTransientFailures: Boolean = true,
           onResult: (RefreshResult) -> Unit
   ) {
     val config = DeviceManager.getServerConnectionConfig(serverConnectionConfigId)
@@ -217,53 +218,39 @@ class ApiHandler(var ctx:Context) {
       onResult(RefreshResult.Rejected)
       return
     }
-    val request = try {
-      Request.Builder()
-              .url("${config.address}/auth/refresh")
-              .addHeader("x-refresh-token", refreshToken)
-              .addHeader("Content-Type", "application/json")
-              .post(EMPTY_REQUEST)
-              .build()
-    } catch (e: Exception) {
-      AbsLogger.error(tag, "Could not create refresh request for ${config.name}: ${e.message}")
-      onResult(RefreshResult.Transient)
-      return
-    }
-    (httpClient ?: defaultClient).newCall(request).enqueue(object : Callback {
-      override fun onFailure(call: Call, e: IOException) {
-        AbsLogger.error(tag, "Token refresh failed for ${config.name}: ${e.message}")
-        onResult(RefreshResult.Transient)
-      }
-
-      override fun onResponse(call: Call, response: Response) {
-        response.use {
-          if (!it.isSuccessful) {
-            AbsLogger.error(tag, "Token refresh returned ${it.code} for ${config.name}")
-            if (it.code != 401 && it.code != 403) {
-              onResult(RefreshResult.Transient)
-              return
-            }
-            handleRefreshRejected(serverConnectionConfigId)
-            onResult(RefreshResult.Rejected)
-            return
-          }
-          try {
-            val user = JSONObject(it.body!!.string()).optJSONObject("user")
-            val accessToken = user?.optString("accessToken").orEmpty()
-            if (accessToken.isEmpty()) {
-              AbsLogger.error(tag, "Refresh response had no access token for ${config.name}")
-              onResult(RefreshResult.Transient)
-              return
-            }
-            updateTokens(accessToken, user?.optString("refreshToken").orEmpty().ifEmpty { refreshToken }, serverConnectionConfigId)
-            onResult(RefreshResult.Success(accessToken))
-          } catch (e: Exception) {
-            AbsLogger.error(tag, "Could not parse refresh response for ${config.name}: ${e.message}")
-            onResult(RefreshResult.Transient)
-          }
+    fun credentialIsCurrent() = DeviceManager.getServerConnectionConfig(serverConnectionConfigId) != null &&
+            secureStorage.getRefreshToken(serverConnectionConfigId) == refreshToken
+    fun transientFailure() {
+      if (retryTransientFailures && credentialIsCurrent()) {
+        try {
+          TokenRefreshRetryWorker.enqueue(ctx, serverConnectionConfigId, refreshToken)
+        } catch (e: Exception) {
+          // Scheduling failure must still complete the original HTTP/download callback.
+          AbsLogger.error(tag, "Could not schedule token renewal retry: ${e.javaClass.simpleName}")
         }
       }
-    })
+      onResult(RefreshResult.Transient)
+    }
+    TokenRefreshRequest(httpClient ?: defaultClient).execute(config.address, refreshToken) { result ->
+      // A delayed recovery response must not overwrite or reject a later login/renewal.
+      if (!credentialIsCurrent()) {
+        onResult(RefreshResult.Transient)
+      } else when (result) {
+        is TokenRefreshRequest.Result.Transient -> {
+          AbsLogger.error(tag, "${result.reason} for ${config.name}")
+          transientFailure()
+        }
+        is TokenRefreshRequest.Result.Rejected -> {
+          AbsLogger.error(tag, "Token refresh returned ${result.status} for ${config.name}")
+          handleRefreshRejected(serverConnectionConfigId)
+          onResult(RefreshResult.Rejected)
+        }
+        is TokenRefreshRequest.Result.Tokens -> {
+          updateTokens(result.access, result.refresh, serverConnectionConfigId)
+          onResult(RefreshResult.Success(result.access))
+        }
+      }
+    }
   }
 
   /**
