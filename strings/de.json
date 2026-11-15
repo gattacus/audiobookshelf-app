@@ -1,4 +1,5 @@
 {
+  "MessageSwitchLibraryFailed": "Bibliothek konnte nicht gewechselt werden. Prüfe deine Verbindung und versuche es erneut.",
   "ButtonSelectEpisodes": "Episoden auswählen",
   "ButtonSelectAll": "Alle auswählen",
   "ButtonClearSelection": "Auswahl aufheben",

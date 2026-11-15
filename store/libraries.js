@@ -5,6 +5,7 @@ export const state = () => ({
   lastLoad: 0,
   currentLibraryId: '',
   showModal: false,
+  switchingLibrary: false,
   issues: 0,
   filterData: null,
   numUserPlaylists: 0,
@@ -12,6 +13,9 @@ export const state = () => ({
 })
 
 export const getters = {
+  getCanSwitchLibrary: (state, getters, rootState) => {
+    return !!rootState.user?.user && rootState.networkConnected && !state.switchingLibrary && state.libraries.length > 1 && !!getters.getCurrentLibrary
+  },
   getCurrentLibrary: state => {
     return state.libraries.find(lib => lib.id === state.currentLibraryId)
   },
@@ -34,16 +38,50 @@ export const getters = {
 }
 
 export const actions = {
+  // Android picker and swipe share one request, preference update and notification.
+  async switchLibrary({ state, getters, commit, dispatch }, { libraryId, direction } = {}) {
+    if (this.$eventBus.$platform !== 'android' || !getters.getCanSwitchLibrary) return false
+    if (direction === 1 || direction === -1) {
+      const index = state.libraries.findIndex(lib => lib.id === state.currentLibraryId)
+      libraryId = state.libraries[(index + direction + state.libraries.length) % state.libraries.length].id
+    }
+    if (!state.libraries.some(lib => lib.id === libraryId) || libraryId === state.currentLibraryId) return false
+
+    commit('setSwitchingLibrary', true)
+    try {
+      const data = await dispatch('fetch', libraryId)
+      if (!data) {
+        this.$eventBus.$toast.error(this.$eventBus.$strings.MessageSwitchLibraryFailed)
+        return false
+      }
+      await this.$localStore.setLastLibraryId(libraryId)
+      this.$eventBus.$emit('library-changed', libraryId)
+      // A device feedback failure must not turn a successful switch into a failure.
+      try {
+        await this.$hapticsImpact()
+      } catch (error) {
+        console.warn('Library switch haptics unavailable', error)
+      }
+      return true
+    } finally {
+      commit('setSwitchingLibrary', false)
+    }
+  },
   fetch({ state, commit, dispatch, rootState }, libraryId) {
     if (!rootState.user || !rootState.user.user) {
       console.error('libraries/fetch - User not set')
       return false
     }
 
+    const userId = rootState.user.user.id
+    const serverId = rootState.user.serverConnectionConfig?.id
     return this.$nativeHttp
       .get(`/api/libraries/${libraryId}?include=filterdata`)
       .then((data) => {
+        // Ignore a late Android response after disconnecting or switching accounts.
+        if (this.$eventBus.$platform === 'android' && (!rootState.networkConnected || rootState.user.user?.id !== userId || rootState.user.serverConnectionConfig?.id !== serverId)) return false
         const library = data.library
+        if (!library || library.id !== libraryId) return false
         const filterData = data.filterdata
         const issues = data.issues || 0
         const numUserPlaylists = data.numUserPlaylists || 0
@@ -101,6 +139,9 @@ export const actions = {
 }
 
 export const mutations = {
+  setSwitchingLibrary(state, val) {
+    state.switchingLibrary = val
+  },
   setShowModal(state, val) {
     state.showModal = val
   },

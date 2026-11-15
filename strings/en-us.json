@@ -1,4 +1,5 @@
 {
+  "MessageSwitchLibraryFailed": "Could not switch libraries. Check your connection and try again.",
   "ButtonCancelDownload": "Cancel download",
   "ButtonKeepDownloading": "Keep downloading",
   "HeaderCancelDownload": "Cancel download?",

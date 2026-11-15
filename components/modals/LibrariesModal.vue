@@ -49,6 +49,10 @@ export default {
   },
   methods: {
     async clickedOption(lib) {
+      if (this.$platform === 'android') {
+        this.show = false
+        return this.$store.dispatch('libraries/switchLibrary', { libraryId: lib.id })
+      }
       await this.$hapticsImpact()
       this.show = false
       if (lib.id === this.currentLibraryId) return

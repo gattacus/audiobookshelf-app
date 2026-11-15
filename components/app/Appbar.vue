@@ -8,7 +8,18 @@
         <span class="material-symbols text-3xl text-fg">arrow_back</span>
       </a>
       <div v-if="user && currentLibrary">
-        <button type="button" aria-label="Show library modal" class="pl-1.5 pr-2.5 py-2 bg-bg bg-opacity-30 rounded-md flex items-center" @click="clickShowLibraryModal">
+        <button
+          type="button"
+          aria-label="Show library modal"
+          class="pl-1.5 pr-2.5 py-2 bg-bg bg-opacity-30 rounded-md flex items-center"
+          :style="$platform === 'android' ? { touchAction: 'none' } : null"
+          :aria-busy="$platform === 'android' && $store.state.libraries.switchingLibrary ? 'true' : 'false'"
+          @click="clickShowLibraryModal"
+          @touchstart="libraryTouchStart"
+          @touchmove="libraryTouchMove"
+          @touchend="libraryTouchEnd"
+          @touchcancel="libraryTouchCancel"
+        >
           <ui-library-icon :icon="currentLibraryIcon" :size="4" font-size="base" />
           <p class="text-sm leading-4 ml-2 mt-0.5 max-w-24 truncate">{{ currentLibraryName }}</p>
         </button>
@@ -44,7 +55,9 @@ import { AbsAudioPlayer } from '@/plugins/capacitor'
 export default {
   data() {
     return {
-      onCastAvailableUpdateListener: null
+      onCastAvailableUpdateListener: null,
+      libraryTouch: null,
+      librarySuppressClickUntil: 0
     }
   },
   computed: {
@@ -90,7 +103,50 @@ export default {
     clickShowSideDrawer() {
       this.$store.commit('setShowSideDrawer', true)
     },
-    clickShowLibraryModal() {
+    libraryTouchStart(event) {
+      if (this.$platform !== 'android') return
+      this.librarySuppressClickUntil = 0
+      if (event.touches.length !== 1) {
+        this.libraryTouchCancel()
+        return
+      }
+      const touch = event.touches[0]
+      this.libraryTouch = { id: touch.identifier, x: touch.clientX, y: touch.clientY }
+      // Also detect a second finger landing outside this button.
+      document.addEventListener('touchstart', this.libraryTouchMove, { passive: true })
+    },
+    libraryTouchMove(event) {
+      if (this.$platform !== 'android') return
+      if (event.touches.length !== 1) this.libraryTouchCancel()
+    },
+    libraryTouchCancel() {
+      if (this.$platform !== 'android') return
+      this.libraryTouch = null
+      document.removeEventListener('touchstart', this.libraryTouchMove)
+      this.librarySuppressClickUntil = Date.now() + 750
+    },
+    libraryTouchEnd(event) {
+      if (this.$platform !== 'android' || !this.libraryTouch) return
+      const start = this.libraryTouch
+      this.libraryTouch = null
+      document.removeEventListener('touchstart', this.libraryTouchMove)
+      if (event.touches.length || event.changedTouches.length !== 1) return
+      const end = event.changedTouches[0]
+      if (end.identifier !== start.id) return
+      const dx = end.clientX - start.x
+      const dy = end.clientY - start.y
+      if (Math.abs(dy) < 50 || Math.abs(dy) < 1.5 * Math.abs(dx)) return
+
+      // Consume the swipe even when switching is unavailable (e.g. offline).
+      // A fresh touch resets this guard, so the next intentional tap still works.
+      this.librarySuppressClickUntil = Date.now() + 750
+      if (event.cancelable) event.preventDefault()
+      if (!this.$store.getters['libraries/getCanSwitchLibrary']) return
+      return this.$store.dispatch('libraries/switchLibrary', { direction: dy > 0 ? 1 : -1 })
+    },
+    clickShowLibraryModal(event) {
+      // Keyboard activation has detail=0 and remains available after a gesture.
+      if (this.$platform === 'android' && event?.detail !== 0 && Date.now() < this.librarySuppressClickUntil) return
       this.$store.commit('libraries/setShowModal', true)
     },
     back() {
@@ -107,6 +163,7 @@ export default {
     this.onCastAvailableUpdateListener = await AbsAudioPlayer.addListener('onCastAvailableUpdate', this.onCastAvailableUpdate)
   },
   beforeDestroy() {
+    this.libraryTouchCancel()
     this.onCastAvailableUpdateListener?.remove()
   }
 }
