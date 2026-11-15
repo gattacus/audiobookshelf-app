@@ -10,19 +10,19 @@ import android.util.Log
 import com.audiobookshelf.app.data.*
 import com.audiobookshelf.app.device.DeviceManager
 import com.audiobookshelf.app.server.ApiHandler
+import com.audiobookshelf.app.plugins.AbsLogger
 import com.getcapacitor.JSObject
 import java.util.*
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
 import org.json.JSONException
 import org.json.JSONObject
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
-class MediaManager(private var apiHandler: ApiHandler, var ctx: Context) {
+class MediaManager(
+  private var apiHandler: ApiHandler,
+  var ctx: Context,
+  private val browseLoadTimeoutMs: Long = 15_000L
+) {
   val tag = "MediaManager"
 
   private var serverLibraryItems = mutableListOf<LibraryItem>() // Store all items here
@@ -43,8 +43,7 @@ class MediaManager(private var apiHandler: ApiHandler, var ctx: Context) {
   private var selectedPodcast:Podcast? = null
   private var selectedLibraryItemId:String? = null
   private var podcastEpisodeLibraryItemMap = mutableMapOf<String, LibraryItemWithEpisode>()
-  private var serverConfigIdUsed:String? = null
-  private var serverConfigLastPing:Long = 0L
+  private var serverBrowseContext: String? = null
   var serverUserMediaProgress:MutableList<MediaProgress> = mutableListOf()
   private val androidAutoLibraryCaches = mutableMapOf<String, AndroidAutoBrowseCache<List<ItemInProgress>>>()
   private val browseHandler = Handler(Looper.getMainLooper())
@@ -56,15 +55,44 @@ class MediaManager(private var apiHandler: ApiHandler, var ctx: Context) {
 
   var userSettingsPlaybackRate:Float? = null
 
-  // Android Auto browses on the media browser service main thread, so the server pings
-  // and authorize call must not run there or they block it and trigger an ANR
-  private val androidAutoIOScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+  private fun configKey(config: ServerConnectionConfig?): String? = config?.let {
+    "${it.id}|${it.address}|${it.userId}"
+  }
 
-  // Android Auto re-requests the browse root every ~2s and multiple clients do so at once,
-  // so overlapping loads are coalesced into one to avoid racing on the shared server state
-  private var isLoadingAndroidAutoItems = false
-  private val pendingAndroidAutoLoadCallbacks = mutableListOf<() -> Unit>()
-  private val androidAutoLoadLock = Any()
+  private fun browseConfig(): ServerConnectionConfig? =
+    if (DeviceManager.deviceData.lastServerConnectionConfigId.isNullOrBlank()) null
+    else DeviceManager.serverConnectionConfig ?: DeviceManager.deviceData.getLastServerConnectionConfig()
+
+  private fun browseContextKey(): String? = browseConfig()?.let {
+    "${DeviceManager.deviceData.lastServerConnectionConfigId}|${configKey(it)}"
+  }
+
+  private fun newBrowseLoad(label: String) = AndroidAutoLoadCoordinator(
+    contextKey = { browseContextKey() },
+    now = { SystemClock.elapsedRealtime() },
+    dispatch = { action -> browseHandler.post { action() } },
+    schedule = { delay, action ->
+      val task = Runnable { action() }
+      browseHandler.postDelayed(task, delay)
+      val cancel: () -> Unit = { browseHandler.removeCallbacks(task) }
+      cancel
+    },
+    timeoutMs = browseLoadTimeoutMs,
+    log = { message ->
+      try { AbsLogger.info(tag, "Android Auto $label $message") }
+      catch (error: Exception) { Log.e(tag, "Could not retain Android Auto diagnostics: ${error.javaClass.simpleName}") }
+    }
+  )
+
+  private val androidAutoLoad by lazy { newBrowseLoad("initialization") }
+  private val androidAutoShelfLoads = mutableMapOf<String, AndroidAutoLoadCoordinator>()
+
+  fun closeAndroidAutoBrowse() {
+    androidAutoLoad.invalidate()
+    androidAutoShelfLoads.values.toList().forEach { it.invalidate() }
+    androidAutoShelfLoads.clear()
+    browseHandler.removeCallbacksAndMessages(null)
+  }
 
   fun getIsLibrary(id:String) : Boolean {
     return serverLibraries.find { it.id == id } != null
@@ -152,30 +180,39 @@ class MediaManager(private var apiHandler: ApiHandler, var ctx: Context) {
   }
 
   fun checkResetServerItems():Boolean {
-    // When opening android auto need to check if still connected to server
-    //   and reset any server data already set
-    val serverConnConfig = if (DeviceManager.isConnectedToServer) DeviceManager.serverConnectionConfig else DeviceManager.deviceData.getLastServerConnectionConfig()
-
-    if (!DeviceManager.isConnectedToServer || !DeviceManager.checkConnectivity(ctx) || serverConnConfig == null || serverConnConfig.id != serverConfigIdUsed) {
-      podcastEpisodeLibraryItemMap = mutableMapOf()
-      serverLibraries = listOf()
-      serverLibraryItems = mutableListOf()
-      cachedLibraryAuthors = hashMapOf()
-      cachedLibraryAuthorItems = hashMapOf()
-      cachedLibraryAuthorSeriesItems = hashMapOf()
-      cachedLibrarySeries = hashMapOf()
-      cachedLibrarySeriesItem = hashMapOf()
-      cachedLibraryCollections = hashMapOf()
-      cachedLibraryRecentShelves = hashMapOf()
-      cachedLibraryDiscovery = hashMapOf()
-      cachedLibraryPodcasts = hashMapOf()
-      isLibraryPodcastsCached = hashMapOf()
-      androidAutoLibraryCaches.clear()
-      allLibraryPersonalizationsDone = false
-      libraryPersonalizationsDone = 0
+    // A network interruption must not erase a successful snapshot for the same account.
+    val context = browseContextKey()
+    if (context != serverBrowseContext) {
+      serverBrowseContext = context
+      androidAutoLoad.invalidate()
+      clearServerBrowseItems()
       return true
     }
     return false
+  }
+
+  private fun clearServerBrowseItems() {
+    androidAutoShelfLoads.values.toList().forEach { it.invalidate() }
+    androidAutoShelfLoads.clear()
+    podcastEpisodeLibraryItemMap = mutableMapOf()
+    selectedPodcast = null
+    selectedLibraryItemId = null
+    serverUserMediaProgress = mutableListOf()
+    serverLibraries = listOf()
+    serverLibraryItems = mutableListOf()
+    cachedLibraryAuthors = hashMapOf()
+    cachedLibraryAuthorItems = hashMapOf()
+    cachedLibraryAuthorSeriesItems = hashMapOf()
+    cachedLibrarySeries = hashMapOf()
+    cachedLibrarySeriesItem = hashMapOf()
+    cachedLibraryCollections = hashMapOf()
+    cachedLibraryRecentShelves = hashMapOf()
+    cachedLibraryDiscovery = hashMapOf()
+    cachedLibraryPodcasts = hashMapOf()
+    isLibraryPodcastsCached = hashMapOf()
+    androidAutoLibraryCaches.clear()
+    allLibraryPersonalizationsDone = false
+    libraryPersonalizationsDone = 0
   }
 
   /**
@@ -211,20 +248,25 @@ class MediaManager(private var apiHandler: ApiHandler, var ctx: Context) {
   private fun populatePersonalizedDataForLibrary(libraryId: String, cb: (Boolean) -> Unit) {
     val cache = androidAutoLibraryCaches.getOrPut(libraryId) { AndroidAutoBrowseCache(emptyList()) }
     val requestId = cache.beginLoad(SystemClock.elapsedRealtime()) ?: return cb(false)
-    apiHandler.getLibraryPersonalized(libraryId) { shelves ->
-      browseHandler.post {
-        // Ignore a response from a previous server/account after the browse cache was reset.
+    val loader = androidAutoShelfLoads.getOrPut(libraryId) { newBrowseLoad("shelves[$libraryId]") }
+    var changed = false
+    loader.load({ success ->
+      if (!success && androidAutoLibraryCaches[libraryId] === cache) {
+        cache.complete(requestId, null, SystemClock.elapsedRealtime())
+      }
+      cb(changed)
+    }) { load ->
+      load.stage<List<LibraryShelfType>?>("personalized", { done ->
+        apiHandler.getLibraryPersonalized(libraryId, done)
+      }) { shelves ->
         if (androidAutoLibraryCaches[libraryId] !== cache) {
-          cb(false)
-          return@post
+          load.complete(false, "cache_reset")
+          return@stage
         }
-        Log.d(tag, "populatePersonalizedDataForLibrary $libraryId")
         val continueItems = shelves?.let { AndroidAutoContinueItems.fromShelves(it, serverUserMediaProgress) }
-        cache.complete(requestId, continueItems, SystemClock.elapsedRealtime())
         if (shelves == null) {
-          Log.w(tag, "Android Auto shelves unavailable; retaining previous items and retrying")
-          cb(false)
-          return@post
+          load.complete(false, "unavailable")
+          return@stage
         }
         continueItems.orEmpty().forEach { item ->
           val libraryItem = item.libraryItemWrapper as LibraryItem
@@ -312,8 +354,9 @@ class MediaManager(private var apiHandler: ApiHandler, var ctx: Context) {
           }
 
         }
-        Log.d(tag, "populatePersonalizedDataForLibrary $libraryId DONE")
-        cb(true)
+        cache.complete(requestId, continueItems, SystemClock.elapsedRealtime())
+        changed = true
+        load.complete(true, "loaded")
       }
     }
   }
@@ -727,124 +770,6 @@ class MediaManager(private var apiHandler: ApiHandler, var ctx: Context) {
       }
   }
 
-  /**
-   * Loads libraries for selected server with stats
-   */
-  private fun loadLibraries(cb: (List<Library>) -> Unit) {
-    if (serverLibraries.isNotEmpty()) {
-      cb(serverLibraries)
-    } else {
-      apiHandler.getLibraries { loadedLibraries ->
-        serverLibraries = loadedLibraries
-        cb(serverLibraries)
-      }
-    }
-  }
-
-  private suspend fun checkServerConnection(config:ServerConnectionConfig) : Boolean {
-    var successfulPing = false
-    suspendCoroutine { cont ->
-      apiHandler.pingServer(config) {
-        Log.d(tag, "checkServerConnection: Checked server conn for ${config.address} result = $it")
-        successfulPing = it
-        cont.resume(it)
-      }
-    }
-    return successfulPing
-  }
-
-  private suspend fun authorize(config:ServerConnectionConfig) : MutableList<MediaProgress> {
-    var mediaProgress:MutableList<MediaProgress> = mutableListOf()
-    suspendCoroutine { cont ->
-      apiHandler.authorize(config) {
-        Log.d(tag, "authorize: Authorized server config ${config.address} result = $it")
-        if (!it.isNullOrEmpty()) {
-          mediaProgress = it
-        }
-        cont.resume(mediaProgress)
-      }
-    }
-    return mediaProgress
-  }
-
-  private suspend fun syncLocalSessionsAndProgress() {
-    suspendCoroutine { cont ->
-      apiHandler.syncLocalSessionsAndProgress { _, _ ->
-        cont.resume(Unit)
-      }
-    }
-  }
-
-  // Runs on [androidAutoIOScope] rather than blocking the caller: this is reached from
-  // onLoadChildren on the media browser service main thread, and the pings/authorize below
-  // are network calls, so runBlocking here caused ANRs while browsing in Android Auto
-  private fun checkSetValidServerConnectionConfig(cb: (Boolean) -> Unit) = androidAutoIOScope.launch {
-    Log.d(tag, "checkSetValidServerConnectionConfig | serverConfigIdUsed=$serverConfigIdUsed | lastServerConnectionConfigId=${DeviceManager.deviceData.lastServerConnectionConfigId}")
-
-    coroutineScope {
-      if (!DeviceManager.checkConnectivity(ctx)) {
-        serverUserMediaProgress = mutableListOf()
-        Log.d(tag, "checkSetValidServerConnectionConfig: No connectivity")
-        cb(false)
-      } else if (DeviceManager.deviceData.lastServerConnectionConfigId.isNullOrBlank()) { // If in offline mode last server connection config is unset
-        serverUserMediaProgress = mutableListOf()
-        Log.d(tag, "checkSetValidServerConnectionConfig: No last server connection config")
-        cb(false)
-      } else {
-        var hasValidConn = false
-        var lookupMediaProgress = true
-
-        if (!serverConfigIdUsed.isNullOrEmpty() && serverConfigLastPing > 0L && System.currentTimeMillis() - serverConfigLastPing < 5000) {
-            Log.d(tag, "checkSetValidServerConnectionConfig last ping less than a 5 seconds ago")
-          hasValidConn = true
-          lookupMediaProgress = false
-        } else {
-          serverUserMediaProgress = mutableListOf()
-        }
-
-        if (!hasValidConn) {
-          // First check if the current selected config is pingable
-          DeviceManager.serverConnectionConfig?.let {
-            hasValidConn = checkServerConnection(it)
-            Log.d(
-              tag,
-              "checkSetValidServerConnectionConfig: Current config ${DeviceManager.serverAddress} is pingable? $hasValidConn"
-            )
-          }
-        }
-
-        if (!hasValidConn) {
-          // Loop through available configs and check if can connect
-          for (config: ServerConnectionConfig in DeviceManager.deviceData.serverConnectionConfigs) {
-            val result = checkServerConnection(config)
-
-            if (result) {
-              hasValidConn = true
-              DeviceManager.serverConnectionConfig = config
-              Log.d(tag, "checkSetValidServerConnectionConfig: Set server connection config ${DeviceManager.serverConnectionConfigId}")
-              break
-            }
-          }
-        }
-
-        if (hasValidConn) {
-          serverConfigLastPing = System.currentTimeMillis()
-
-          if (lookupMediaProgress) {
-            Log.d(tag, "Has valid conn now sync local sessions and get user media progress")
-            syncLocalSessionsAndProgress()
-            DeviceManager.serverConnectionConfig?.let {
-              serverUserMediaProgress = authorize(it)
-            }
-          }
-        }
-
-        cb(hasValidConn)
-      }
-    }
-
-  }
-
   fun loadServerUserMediaProgress(cb: () -> Unit) {
     Log.d(tag, "Loading server media progress")
     if (DeviceManager.serverConnectionConfig == null) {
@@ -864,47 +789,73 @@ class MediaManager(private var apiHandler: ApiHandler, var ctx: Context) {
     }
   }
 
-  fun loadAndroidAutoItems(cb: () -> Unit) {
-    Log.d(tag, "Load android auto items")
-
-    // Coalesce overlapping calls into a single load, every caller still gets its callback
-    synchronized(androidAutoLoadLock) {
-      pendingAndroidAutoLoadCallbacks.add(cb)
-      if (isLoadingAndroidAutoItems) {
-        Log.d(tag, "loadAndroidAutoItems: Load already in progress, queued callback")
-        return
+  /** Network calls are asynchronous; all state and completion handling stay on the main thread. */
+  fun loadAndroidAutoItems(cb: (Boolean) -> Unit) {
+    androidAutoLoad.load(cb) { load ->
+      val selected = browseConfig()?.copy()
+      if (selected == null || !DeviceManager.checkConnectivity(ctx)) {
+        load.complete(false, "offline")
+        return@load
       }
-      isLoadingAndroidAutoItems = true
-    }
+      // Preserve saved connection fallback, but avoid pinging the selected address twice.
+      val candidates = (listOf(selected) + DeviceManager.deviceData.serverConnectionConfigs.map { it.copy() })
+        .distinctBy { configKey(it) }
 
-    val onLoadFinished = {
-      val callbacks: List<() -> Unit>
-      synchronized(androidAutoLoadLock) {
-        isLoadingAndroidAutoItems = false
-        callbacks = pendingAndroidAutoLoadCallbacks.toList()
-        pendingAndroidAutoLoadCallbacks.clear()
-      }
-      callbacks.forEach { it() }
-    }
-
-    // Check if any valid server connection if not use locally downloaded books
-    checkSetValidServerConnectionConfig { isConnected ->
-      if (isConnected) {
-        serverConfigIdUsed = DeviceManager.serverConnectionConfigId
-        Log.d(tag, "loadAndroidAutoItems: Connected to server config id=$serverConfigIdUsed")
-
-        loadLibraries { libraries ->
-          if (libraries.isEmpty()) {
-            Log.w(tag, "No libraries returned from server request")
-            onLoadFinished()
-          } else {
-            onLoadFinished() // Fully loaded
+      fun loadFrom(config: ServerConnectionConfig) {
+        load.adoptContext {
+          if (configKey(DeviceManager.serverConnectionConfig) != configKey(config)) {
+            DeviceManager.serverConnectionConfig = DeviceManager.getServerConnectionConfig(config.id)
+              ?.takeIf { configKey(it) == configKey(config) } ?: config
+            serverBrowseContext = browseContextKey()
+            clearServerBrowseItems()
           }
         }
-      } else { // Not connected to server
-        Log.d(tag, "loadAndroidAutoItems: Not connected to server")
-        onLoadFinished()
+        load.stage<Pair<Boolean, String?>>("progress_sync", { done ->
+          // Sync retains its own pending records. Stop waiting after 3s so a stuck sync
+          // (including a coalesced retry) cannot prevent authorization and browsing.
+          val timeout = Runnable { done(false to "wait_timeout") }
+          browseHandler.postDelayed(timeout, 3_000L)
+          apiHandler.syncLocalSessionsAndProgress { success, error ->
+            browseHandler.removeCallbacks(timeout)
+            done(success to error)
+          }
+        }) { syncResult ->
+          load.diagnostic("progress_sync_success=${syncResult.first}")
+          if (syncResult.second == "wait_timeout") load.diagnostic("progress_sync_wait_timeout")
+          // A failed progress upload must not prevent browsing. The sync layer retains it for retry.
+          fun snapshot() = DeviceManager.getServerConnectionConfig(config.id)
+            ?.takeIf { configKey(it) == configKey(config) }?.copy() ?: config.copy()
+          load.stage<MutableList<MediaProgress>?>("authorize", { done -> apiHandler.authorize(snapshot(), done) }) { progress ->
+            if (progress == null) {
+              load.complete(false, "authorization_failed")
+            } else {
+              load.stage<List<Library>?>("libraries", { done -> apiHandler.getLibraries(snapshot(), done) }) { libraries ->
+                if (libraries == null) {
+                  load.complete(false, "libraries_failed")
+                } else {
+                  // Commit only after all stages, while this load still owns the current account.
+                  serverUserMediaProgress = progress
+                  serverLibraries = libraries
+                  load.complete(true, "loaded")
+                }
+              }
+            }
+          }
+        }
       }
+
+      fun ping(index: Int) {
+        if (index >= candidates.size) {
+          load.complete(false, "unreachable")
+          return
+        }
+        val config = candidates[index]
+        load.stage<Boolean>("ping[$index]", { done -> apiHandler.pingServer(config, done) }) { reachable ->
+          load.diagnostic("reachable=$reachable")
+          if (reachable) loadFrom(config) else ping(index + 1)
+        }
+      }
+      ping(0)
     }
   }
 

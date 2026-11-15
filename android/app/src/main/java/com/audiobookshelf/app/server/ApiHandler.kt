@@ -399,19 +399,24 @@ class ApiHandler(var ctx:Context) {
   }
 
   fun getLibraries(cb: (List<Library>) -> Unit) {
+    getLibraries(null) { cb(it.orEmpty()) }
+  }
+
+  internal fun getLibraries(config: ServerConnectionConfig?, cb: (List<Library>?) -> Unit) {
     val mapper = jacksonMapper
-    getRequest("/api/libraries?include=stats", null,null) {
-      val libraries = mutableListOf<Library>()
-
-      var array = JSONArray()
-      if (it.has("libraries")) { // TODO: Server 2.2.9 changed to this
-        array = it.getJSONArray("libraries")
-      } else if (it.has("value")) {
-        array = it.getJSONArray("value")
-      }
-
-      for (i in 0 until array.length()) {
-        libraries.add(mapper.readValue(array.get(i).toString()))
+    getRequest("/api/libraries?include=stats", null, config) {
+      if (!it.getString("error").isNullOrEmpty()) return@getRequest cb(null)
+      val libraries = try {
+        val array = if (it.has("libraries")) {
+          it.getJSONArray("libraries")
+        } else if (it.has("value")) {
+          it.getJSONArray("value")
+        } else return@getRequest cb(null)
+        (0 until array.length()).map { index ->
+          mapper.readValue<Library>(array.get(index).toString())
+        }
+      } catch (error: Exception) {
+        null
       }
       cb(libraries)
     }
