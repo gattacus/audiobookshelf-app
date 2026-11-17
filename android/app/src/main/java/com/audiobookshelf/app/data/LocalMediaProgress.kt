@@ -57,11 +57,20 @@ class LocalMediaProgress(
 
   @JsonIgnore
   fun updateFromPlaybackSession(playbackSession:PlaybackSession) {
+    if (playbackSession.isLocal && playbackSession.isPodcastEpisode) {
+      duration = playbackSession.getTotalDuration()
+    }
     currentTime = playbackSession.currentTime
     progress = playbackSession.progress
     lastUpdate = playbackSession.updatedAt
     isFinished = playbackSession.progress >= 0.99
     finishedAt = if (isFinished) lastUpdate else null
+  }
+
+  @JsonIgnore
+  internal fun getResumeTime(isPodcast: Boolean): Double {
+    // An older player could mark a podcast finished while playing past its metadata duration.
+    return if (!isFinished || (isPodcast && progress > 1.0)) currentTime else 0.0
   }
 
   @JsonIgnore

@@ -159,6 +159,18 @@ class PlaybackSession(
   }
 
   @JsonIgnore
+  internal fun updateLocalPodcastDuration(durationMs: Long): Boolean {
+    if (!isLocal || !isPodcastEpisode || durationMs <= 0) return false
+    val track = audioTracks.singleOrNull() ?: return false
+    val measuredDuration = durationMs / 1000.0
+    if (duration == measuredDuration && track.duration == measuredDuration) return false
+
+    duration = measuredDuration
+    audioTracks = mutableListOf(track.copy(duration = measuredDuration))
+    return true
+  }
+
+  @JsonIgnore
   fun checkIsServerVersionGte(compareVersion: String): Boolean {
     // Safety check this playback session is the same one currently connected (should always be)
     if (DeviceManager.serverConnectionConfigId != serverConnectionConfigId) {

@@ -504,7 +504,8 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
             tag,
             "Prepare Player Session Current Time=${playbackSession.currentTime}, Duration=${playbackSession.duration}"
     )
-    if (playbackSession.duration - playbackSession.currentTime < 5) {
+    val isLocalPodcast = playbackSession.isLocal && playbackSession.isPodcastEpisode
+    if (!isLocalPodcast && playbackSession.duration - playbackSession.currentTime < 5) {
       Log.d(tag, "Prepare Player Session is finished, so restart it")
       playbackSession.currentTime = 0.0
     }
@@ -574,9 +575,15 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
           extractorsFactory.setMp3ExtractorFlags(Mp3Extractor.FLAG_ENABLE_INDEX_SEEKING)
         }
 
+        // Identify the loaded episode independently of any callbacks from the previous playlist.
+        val mediaItem = if (isLocalPodcast) {
+          mediaItems[0].buildUpon().setMediaId(playbackSession.id).build()
+        } else {
+          mediaItems[0]
+        }
         mediaSource =
                 ProgressiveMediaSource.Factory(dataSourceFactory, extractorsFactory)
-                        .createMediaSource(mediaItems[0])
+                        .createMediaSource(mediaItem)
       } else if (!playbackSession.isHLS) {
         AbsLogger.info("PlayerNotificationService", "preparePlayer: Direct playing item ${currentPlaybackSession?.mediaItemId}.")
         val dataSourceFactory = DefaultHttpDataSource.Factory()
@@ -861,6 +868,20 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
 
   fun getDuration(): Long {
     return currentPlaybackSession?.totalDurationMs ?: 0L
+  }
+
+  internal fun updateLocalPodcastDuration(player: Player): Boolean {
+    val session = currentPlaybackSession ?: return false
+    if (player !== currentPlayer || player !== mPlayer ||
+      player.currentMediaItem?.mediaId != session.id || player.mediaItemCount != 1
+    ) return false
+
+    val durationMs = player.duration
+    if (!session.updateLocalPodcastDuration(durationMs)) return false
+    mediaProgressSyncer.currentPlaybackSession?.takeIf { it.id == session.id }
+      ?.updateLocalPodcastDuration(durationMs)
+    mediaSessionConnector.invalidateMediaSessionMetadata()
+    return true
   }
 
   fun getCurrentPlaybackSessionCopy(): PlaybackSession? {

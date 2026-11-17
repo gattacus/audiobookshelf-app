@@ -125,10 +125,13 @@ class PlayerListener(
   override fun onEvents(player: Player, events: Player.Events) {
     Log.d(tag, "onEvents ${playerNotificationService.getMediaPlayer()} | ${events.size()}")
 
+    val durationChanged = events.containsAny(Player.EVENT_TIMELINE_CHANGED, Player.EVENT_PLAYBACK_STATE_CHANGED) &&
+      playerNotificationService.updateLocalPodcastDuration(player)
+
     // Read the final state after individual callbacks (including auto-rewind seeks).
     // Playback/progress guards in onIsPlayingChanged must not suppress widget feedback.
     if (events.containsAny(Player.EVENT_IS_PLAYING_CHANGED, Player.EVENT_PLAYBACK_STATE_CHANGED,
-        Player.EVENT_MEDIA_ITEM_TRANSITION)) {
+        Player.EVENT_MEDIA_ITEM_TRANSITION) || durationChanged) {
       updateItemWidgets()
     }
 
@@ -165,6 +168,8 @@ class PlayerListener(
         Log.d(tag, "STATE_IDLE")
         playerNotificationService.sendClientMetadata(PlayerState.IDLE)
       }
+    } else if (durationChanged && player.playbackState == Player.STATE_READY) {
+      playerNotificationService.sendClientMetadata(PlayerState.READY)
     }
 
     if (events.contains(Player.EVENT_MEDIA_METADATA_CHANGED)) {

@@ -10,9 +10,9 @@ object MediaEventManager {
 
   var clientEventEmitter: PlayerNotificationService.ClientEventEmitter? = null
 
-  fun playEvent(playbackSession: PlaybackSession) {
+  fun playEvent(playbackSession: PlaybackSession, currentTime: Double) {
     Log.i(tag, "Play Event for media \"${playbackSession.displayTitle}\"")
-    addPlaybackEvent("Play", playbackSession, null)
+    addPlaybackEvent("Play", playbackSession, null, currentTime = currentTime)
   }
 
   fun pauseEvent(playbackSession: PlaybackSession, syncResult: SyncResult?) {
@@ -92,7 +92,8 @@ object MediaEventManager {
   private fun addPlaybackEvent(
           eventName: String,
           playbackSession: PlaybackSession,
-          syncResult: SyncResult?
+          syncResult: SyncResult?,
+          currentTime: Double = playbackSession.currentTime
   ) {
     val mediaItemHistory =
             getMediaItemHistoryMediaItem(playbackSession.mediaItemId)
@@ -103,7 +104,7 @@ object MediaEventManager {
                     name = eventName,
                     type = "Playback",
                     description = "",
-                    currentTime = playbackSession.currentTime,
+                    currentTime = currentTime,
                     serverSyncAttempted = syncResult?.serverSyncAttempted ?: false,
                     serverSyncSuccess = syncResult?.serverSyncSuccess,
                     serverSyncMessage = syncResult?.serverSyncMessage,

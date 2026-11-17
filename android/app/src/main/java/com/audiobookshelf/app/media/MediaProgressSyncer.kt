@@ -120,7 +120,7 @@ class MediaProgressSyncer(
 
   fun play(playbackSession: PlaybackSession) {
     Log.d(tag, "play ${playbackSession.displayTitle}")
-    MediaEventManager.playEvent(playbackSession)
+    MediaEventManager.playEvent(playbackSession, playerNotificationService.getCurrentTimeSeconds())
 
     start(playbackSession)
   }

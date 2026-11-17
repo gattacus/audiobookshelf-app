@@ -12,12 +12,15 @@ import com.audiobookshelf.app.data.MediaTypeMetadata
 import com.audiobookshelf.app.data.PlaybackSession
 import com.audiobookshelf.app.managers.DbManager
 import com.audiobookshelf.app.player.PLAYMETHOD_LOCAL
+import com.audiobookshelf.app.player.PlayerNotificationService
 import com.audiobookshelf.app.server.ApiHandler
 import com.esotericsoftware.kryo.Kryo
 import com.esotericsoftware.kryo.serializers.CompatibleFieldSerializer
+import com.google.android.exoplayer2.Player
 import io.paperdb.Book
 import io.paperdb.Paper
 import java.io.File
+import java.lang.reflect.Proxy
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -29,7 +32,7 @@ import org.junit.runner.RunWith
 class OfflineProgressSyncDeviceTest {
   private lateinit var context: Context
   private val db = DbManager()
-  private val books = listOf("playbackSession", "localMediaProgress", "localLibraryItems", "device", "log")
+  private val books = listOf("playbackSession", "localMediaProgress", "localLibraryItems", "device", "log", "mediaItemHistory")
 
   @Before
   fun setUp() {
@@ -53,6 +56,33 @@ class OfflineProgressSyncDeviceTest {
   fun tearDown() {
     if (!::context.isInitialized || !books.all { File(Paper.book(it).path).parentFile == context.filesDir }) return
     books.forEach { Paper.book(it).destroy() }
+  }
+
+  @Test
+  fun playHistoryRecordsLivePositionWhenThePreparedSessionIsStale() {
+    val prepared = session("resume-session", itemId = "resume-book", updatedAt = 1000L)
+    val player = Proxy.newProxyInstance(Player::class.java.classLoader, arrayOf(Player::class.java)) { _, method, _ ->
+      when (method.name) {
+        "getCurrentPosition" -> 240_500L
+        "getMediaItemCount" -> 1
+        else -> error("Unexpected player call: ${method.name}")
+      }
+    } as Player
+
+    InstrumentationRegistry.getInstrumentation().runOnMainSync {
+      val service = PlayerNotificationService().apply { currentPlayer = player }
+      val syncer = MediaProgressSyncer(service, ApiHandler(context))
+      try {
+        syncer.play(prepared)
+        val event = requireNotNull(db.getMediaItemHistory(prepared.mediaItemId)).events.single()
+        assertEquals("Play", event.name)
+        assertEquals(240.5, event.currentTime)
+        assertEquals(30.0, prepared.currentTime, 0.0)
+        assertNull(db.getPlaybackSession(prepared.id))
+      } finally {
+        syncer.stop(false) {}
+      }
+    }
   }
 
   @Test

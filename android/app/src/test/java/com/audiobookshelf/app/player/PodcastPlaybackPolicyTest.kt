@@ -39,6 +39,38 @@ class PodcastPlaybackPolicyTest {
     assertTrue(PodcastPlaybackPolicy.validEpisodes(null).isEmpty())
   }
 
+  @Test fun downloadedEpisodeUsesMeasuredDurationForProgress() {
+    val track = AudioTrack(1, 0.0, 517.0, "episode.opus", "file:///episode.opus", "audio/opus", null, true, "episode-file", null)
+    val session = PlaybackSession(
+      "session", null, null, null, "podcast", PodcastMetadata("Podcast", null, null, mutableListOf(), false),
+      DeviceInfo("device", "Google", "Pixel", 36, "test"), emptyList(), "Episode", null, null, 517.0,
+      PLAYMETHOD_LOCAL, 1L, 2L, 0L, mutableListOf(track), 869.59, null, null, "episode", null, null, PLAYER_EXO
+    )
+    val progress = session.getNewLocalMediaProgress().apply { updateFromPlaybackSession(session) }
+
+    assertTrue(progress.isFinished)
+    assertEquals(869.59, progress.getResumeTime(isPodcast = true), 0.001)
+    assertEquals(0.0, progress.getResumeTime(isPodcast = false), 0.0)
+    assertFalse(session.updateLocalPodcastDuration(com.google.android.exoplayer2.C.TIME_UNSET))
+    assertEquals(517.0, session.getTotalDuration(), 0.0)
+    assertTrue(session.updateLocalPodcastDuration(2_482_004))
+    assertFalse(session.updateLocalPodcastDuration(2_482_004))
+    assertEquals(517.0, track.duration, 0.0)
+    assertEquals(2482.004, session.duration, 0.0)
+    assertEquals(2482.004, session.getTotalDuration(), 0.0)
+
+    progress.updateFromPlaybackSession(session)
+    assertEquals(2482.004, progress.duration, 0.0)
+    assertEquals(869.59, progress.currentTime, 0.001)
+    assertEquals(0.35, progress.progress, 0.001)
+    assertFalse(progress.isFinished)
+
+    session.currentTime = session.duration
+    progress.updateFromPlaybackSession(session)
+    assertTrue(progress.isFinished)
+    assertEquals(0.0, progress.getResumeTime(isPodcast = true), 0.0)
+  }
+
   @Test fun serialContinuesOldestFirstAndSkipsFinishedEpisodes() {
     val source = listOf(episode("last", 4), episode("first", 1), episode("finished", 2, true), episode("next", 3))
     assertEquals("next", PodcastPlaybackPolicy.next(source, "first", true)?.id)
